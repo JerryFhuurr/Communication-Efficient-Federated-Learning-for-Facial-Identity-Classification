@@ -1,4 +1,5 @@
-# Flower + PyTorch CelebA baseline
+# Communication-Efficient Federated Learning for Facial Identity Classification
+## Flower + PyTorch CelebA baseline
 
 A small, local **closed-set identity classifier**: identify which of ten selected
 CelebA identities is pictured. This is not face verification or recognition of
