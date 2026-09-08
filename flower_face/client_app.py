@@ -1,9 +1,10 @@
 """Flower Message API handlers for local training and validation."""
 
-from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
+from flwr.app import ArrayRecord, ConfigRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 
 from flower_face.task import Net, load_data, seed_everything, test, train as train_model
+from flower_face.updates import CODEC, compression_settings, encode_update
 
 app = ClientApp()
 
@@ -23,12 +24,18 @@ def setup(msg, context):
 @app.train()
 def train(msg: Message, context: Context):
     model, config, client_id, seed = setup(msg, context)
+    method, levels = compression_settings(config)
+    reference = {name: value.detach().cpu().clone() for name, value in model.state_dict().items()} if method == "qsgd" else None
     loader = load_data(config, client_id, "train", seed)
     loss = train_model(model, loader, config["local-epochs"], msg.content["config"]["lr"])
-    content = RecordDict({
-        "arrays": ArrayRecord(model.state_dict()),
-        "metrics": MetricRecord({"train_loss": loss, "num-examples": len(loader.dataset)}),
-    })
+    content = RecordDict({"metrics": MetricRecord({"train_loss": loss, "num-examples": len(loader.dataset)})})
+    if method == "qsgd":
+        server_round = int(msg.content["config"]["server-round"])
+        content["qsgd"] = encode_update(model.state_dict(), reference, levels=levels,
+                                        seed=config["seed"], server_round=server_round, client_id=client_id)
+        content["update"] = ConfigRecord({"codec": CODEC, "server-round": server_round, "levels": levels})
+    else:
+        content["arrays"] = ArrayRecord(model.state_dict())
     return Message(content=content, reply_to=msg)
 
 

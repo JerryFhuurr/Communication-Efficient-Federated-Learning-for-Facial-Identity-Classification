@@ -17,6 +17,9 @@ Flower is pinned to 1.36.0; this project runs locally with four simulated client
 | `flower_face/client_app.py` | Receive weights, train on one client, return weights and sample-weighted metrics |
 | `flower_face/server_app.py` | Run ordinary FedAvg with validation checkpoint selection and optional test evaluation |
 | `flower_face/communication.py` | Measure serialized Flower object sizes and log training/validation upload and download totals |
+| `compression/qsgd.py` | Standalone L2 QSGD quantizer and dense byte codec; no Flower or PyTorch imports |
+| `flower_face/updates.py` | Adapt model deltas to named QSGD byte packets and validate incoming updates |
+| `compression/check_qsgd.py` | Synthetic codec size/error check with a saved JSON report |
 | `flower_face/experiment.py` | Shared checkpoint saving, experiment metadata, and incremental history; no Flower imports |
 | `flower_face/check_training.py` | Centralized and tiny-batch training diagnostics using the same CNN |
 | `flower_face/prepare_data.py` | Reproducible identity selection and disjoint image splits |
@@ -25,6 +28,8 @@ Flower is pinned to 1.36.0; this project runs locally with four simulated client
 | `tests/test_baseline.py` | Split integrity and actual Flower training/evaluation message handlers |
 | `tests/test_checkpoints.py` | Checkpoint/round matching, tie handling, and isolation of test evaluation |
 | `tests/test_communication.py` | Serialization round trip, byte counts, per-recipient accounting, and partial failures |
+| `tests/test_qsgd.py` | Quantization statistics, binary round trips, exact sizes, edge cases, and malformed input |
+| `tests/test_qsgd_flower.py` | Client/server integration, weighted delta aggregation, serialization, and codec accounting |
 
 ## Environment
 
@@ -37,8 +42,8 @@ python -m venv .venv
 ```
 
 CPU execution is intentional. Images become RGB 64×64 tensors, normalized to
-[-1, 1]. Each worker uses one PyTorch thread. No augmentation or compression is
-enabled. Ray support on Windows is experimental; Flower recommends WSL2 if
+[-1, 1]. Each worker uses one PyTorch thread. No augmentation is enabled.
+Compression is optional and disabled by default. Ray support on Windows is experimental; Flower recommends WSL2 if
 native Windows simulation fails. See [Flower simulation documentation](https://flower.ai/docs/framework/how-to-run-simulations.html).
 
 ## Data already downloaded
@@ -253,9 +258,12 @@ their intermediate weights were never saved.
 
 ## Later thesis work
 
-Keep future codecs in a separate, Flower-independent `compression/` package.
-Implement and unit-test QSGD, LLZ-p (including exact lossless `p=0`), and LLZ-SI
-before integrating them into client/server messaging. Read the source papers in
+The standalone QSGD quantizer and dense binary codec are now in `compression/`.
+See the [codec specification and checks](compression/README.md). Flower can use it
+for client delta uploads with `--compression qsgd`; the default remains uncompressed.
+Compare using matched settings and the same communication boundary, then repeat
+across seeds before drawing performance conclusions. Implement and unit-test LLZ-p (including
+exact lossless `p=0`) and LLZ-SI before integrating them. Read the source papers in
 `papers/` when those implementations begin; no algorithm details are assumed here.
 Then compare uncompressed, QSGD, QSGD + LLZ-p, LLZ-SI, and Top-k with matched
 data, initialization, and training settings, extending to non-IID partitions.
@@ -285,6 +293,7 @@ Three sizes are reported, all as integer bytes:
 | --- | --- |
 | `raw_array_bytes` | Numeric storage: sum of shape elements × dtype size for every named array |
 | `array_data_bytes` | Actual encoded array buffers: `len(Array.data)`, including NumPy serialization headers |
+| `codec_payload_bytes` | Complete QSD1 byte packets in compressed uploads, including codec headers and padding |
 | `serialized_object_bytes` | Actual byte lengths from Flower's `deflate()` for the Message and every unique descendant object |
 | `serialized_object_bits` | Exactly eight times `serialized_object_bytes` |
 
@@ -380,3 +389,116 @@ The total is 105,001,152 serialized object bits across the three rounds. Byte
 counts may vary with routing metadata, serialization, or object sharing; these
 observed sizes are not hard-coded into the measurement. The saved best and final
 checkpoints both belong to round three in this short pipeline check.
+
+## QSGD client uploads
+
+QSGD is opt-in; default commands and `--compression none` retain the original
+uncompressed FedAvg path. To run the integrated version:
+
+```powershell
+# Four-client smoke check, s=127.
+.venv\Scripts\python.exe -m flower_face.run --rounds 3 --compression qsgd --qsgd-levels 127
+
+# Full development comparison, with the same subset/seed and test still skipped.
+.venv\Scripts\python.exe -m flower_face.run --rounds 300 --compression qsgd --qsgd-levels 127
+.venv\Scripts\python.exe -m flower_face.run --rounds 300 --compression none
+```
+
+Every client receives full-precision global weights `w_t`, performs the same
+local SGD training, and computes `delta_i = local_weights_i - w_t`. Each named
+tensor is quantized independently with an L2 norm and serialized as a QSD1
+packet. The default `s=127` uses seven magnitude bits plus one sign bit per
+coordinate, with additional packet metadata. There is no error feedback.
+
+Uploads carry `qsgd: ConfigRecord({tensor_name: packet_bytes})`, plus an `update`
+ConfigRecord naming the codec, server round, and levels, and the usual training
+metrics. No full model or decoded update is included in that reply. Bytes in a
+ConfigRecord follow Flower's [custom-message approach](https://flower.ai/docs/framework/tutorial-series-customize-the-client-pytorch.html).
+
+The server validates the round, codec, levels, exact tensor names, shapes,
+dtypes, finite loss/decoded values, and positive sample counts. It decodes all
+updates, uses Flower's sample-weighted aggregation on the decoded deltas, and
+sets `w_(t+1) = w_t + sum_i(n_i * decoded_delta_i) / sum_i(n_i)`.
+The reference is captured afresh each round. All four distinct clients must
+reply successfully. Malformed or mixed upload formats stop the experiment.
+
+Training loss describes the client's local SGD updates before compression;
+validation evaluates the reconstructed global model. Checkpoint selection still
+uses the lowest validation loss. Training and validation downloads remain full
+precision, and validation uploads remain metrics-only. QSGD is applied to local
+model deltas, not individual minibatch gradients; this is an experimental FedAvg
+adaptation, not a reproduction of the paper's entire parallel-SGD algorithm.
+
+Codec randomness uses its own NumPy Generator initialized from
+`SeedSequence([seed, server_round, partition_id, 0x51534744])`, visiting tensor
+names in sorted order. It does not consume PyTorch or global NumPy RNG state.
+The seed, round, and partition ID separate the streams from those of other
+clients/rounds and from training. Multi-worker execution can still introduce
+floating-point variation between independent runs.
+
+QSGD experiments use `outputs/fedavg-qsgd-<timestamp>/`. Configuration records
+`compression` and `qsgd-levels`; experiment metadata documents the update target,
+normalization, RNG, and absence of error feedback. Existing best/final
+checkpoints and per-round metrics are saved as before.
+
+Communication schema version 2 adds `codec_payload_bytes`, the sum of complete
+QSD1 packets. Compressed uploads contain no ArrayRecord, so their `raw_array_bytes`
+and `array_data_bytes` are zero; that does not mean zero communication. Compare
+**`serialized_object_bytes`/`serialized_object_bits`** across methods: these
+continue to count the full transmitted logical object graph, including the byte
+packets, tensor names, codec metadata, metrics, and Flower object headers. The
+Grid logs each encoded reply before any decoding. Decoded aggregation records
+are server-local copies and are never counted as additional uploads.
+
+The logical measurement boundary is unchanged from schema version 1; the new
+packet sub-counter is zero for uncompressed messages. It is a subset of serialized
+bytes and must not be added to them. These counters still exclude transport
+traffic, cache effects, and retries. Upload compression affects only one of the
+three model transfers per client per round, so total savings will be smaller than
+the codec's roughly fourfold reduction at `s=127`.
+
+Use matched manifest hashes, model/training configuration, round counts, and
+validation schedules when comparing. Select each model by the same validation
+rule, keep the held-out test out of development, and repeat across seeds before
+drawing thesis conclusions. The original baseline output directories remain valid
+references and are not rewritten by QSGD runs.
+
+Verification: all 65 tests passed, including real ClientApp/strategy dispatch
+through Flower serialization for both modes, unequal client sample counts,
+positive and negative updates, reference refresh over two rounds, rejected
+malformed updates, isolated codec RNG, and accounting of compressed bytes before
+decoding. The standalone compression package still imports no Flower or PyTorch.
+
+The real three-round check completed at
+`outputs/fedavg-qsgd-20260908T104355354317Z/` with 48 messages, finite best/final
+checkpoints, and the test skipped. Each training upload carried 90,078 bytes of
+QSD1 packets. Complete serialized traffic across all three rounds was 9,844,656
+bytes, versus 13,125,144 bytes in the earlier uncompressed three-round check.
+The native Windows Ray shutdown traces remain; all client replies succeeded.
+
+### First 300-round QSGD comparison
+
+Completed QSGD run: `outputs/fedavg-qsgd-20260908T104659729947Z/`, Flower run
+`12624072430969573136`. Baseline: `outputs/fedavg-20260908T101443098167Z/`.
+The manifest hash, package versions, and model/training settings matched. All
+4,800 QSGD messages were verified against phase, round, cumulative, and final
+totals. Both QSGD checkpoints contain finite weights; reloading the selected model
+reproduced its recorded validation loss and accuracy. The held-out test was skipped.
+
+| Result | Uncompressed FedAvg | QSGD delta uploads, s=127 |
+| --- | ---: | ---: |
+| Selected round (lowest validation loss) | 207 | 207 |
+| Selected validation loss | 1.747309 | 1.729523 |
+| Selected validation accuracy | 42.5% | 40.0% |
+| Final round-300 validation accuracy | 42.5% | 47.5% |
+| Peak validation accuracy during run | 50.0% | 52.5% |
+| Training upload serialized bytes | 437,382,000 | 109,341,348 |
+| Total serialized bytes, including validation | 1,312,507,896 | 984,470,844 |
+
+Training upload bytes decreased by 75.00%; total serialized bytes decreased by
+24.99%. Downloads were full precision in both runs; small byte differences in
+routing metadata are included in these observed totals. This is one seed with
+only 40 validation images, so the accuracy/loss differences do not establish
+superiority or equivalence. The chosen models follow the loss rule, not the peak
+accuracy row. Detailed checks and comparison are in
+`outputs/fedavg-qsgd-20260908T104659729947Z/baseline_comparison.json`.

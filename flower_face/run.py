@@ -16,6 +16,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rounds", type=int)
     parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--compression", choices=["none", "qsgd"], help="Client upload compression; default: none")
+    parser.add_argument("--qsgd-levels", type=int, help="QSGD positive intervals s; default: 127")
     test_options = parser.add_mutually_exclusive_group()
     test_options.add_argument("--skip-test", action="store_true", help="Use validation only (project default)")
     test_options.add_argument("--evaluate-test", action="store_true", help="Evaluate the validation-selected checkpoint on held-out test data")
@@ -29,6 +31,12 @@ def main():
             parser.error("--rounds must be positive")
         config["num-server-rounds"] = args.rounds
     config["manifest"] = manifest.as_posix()
+    if args.compression is not None:
+        config["compression"] = args.compression
+    if args.qsgd_levels is not None:
+        if not 1 <= args.qsgd_levels <= 65535:
+            parser.error("--qsgd-levels must be in [1, 65535]")
+        config["qsgd-levels"] = args.qsgd_levels
     if args.skip_test:
         config["evaluate-final-test"] = False
     if args.evaluate_test:

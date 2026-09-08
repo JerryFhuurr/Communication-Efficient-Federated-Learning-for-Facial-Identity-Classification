@@ -1,6 +1,8 @@
-"""Ordinary FedAvg with validation-selected and final model checkpoints."""
+"""FedAvg with optional QSGD delta uploads and validation-selected checkpoints."""
 
-from flwr.app import ArrayRecord, ConfigRecord, Context
+from copy import copy
+
+from flwr.app import ArrayRecord, ConfigRecord, Context, RecordDict
 from flwr.serverapp import Grid, ServerApp
 from flwr.serverapp.strategy import FedAvg
 import torch
@@ -8,6 +10,7 @@ import torch
 from flower_face.experiment import Experiment
 from flower_face.communication import CommunicationLedger, MeasuredGrid
 from flower_face.task import Net, load_data, read_manifest, seed_everything, test
+from flower_face.updates import CODEC, compression_settings, decode_update
 
 app = ServerApp()
 
@@ -57,14 +60,59 @@ class CheckpointFedAvg(FedAvg):
         return metrics
 
 
+class QSGDFedAvg(CheckpointFedAvg):
+    """Decode client deltas, average with FedAvg weights, then add to round base."""
+
+    def __init__(self, experiment, clients, levels):
+        super().__init__(experiment, clients)
+        self.levels = levels
+        self.reference = None
+        self.reference_round = None
+
+    def configure_train(self, server_round, arrays, config, grid):
+        self.reference = {k: v.clone() for k, v in arrays.to_torch_state_dict().items()}
+        self.reference_round = server_round
+        return super().configure_train(server_round, arrays, config, grid)
+
+    def aggregate_train(self, server_round, replies):
+        replies = self.checked_replies(replies)
+        if self.reference is None or self.reference_round != server_round:
+            raise RuntimeError("QSGD aggregation has no matching round reference")
+        decoded_replies = []
+        for reply in replies:
+            delta = decode_update(reply.content, self.reference, levels=self.levels, server_round=server_round)
+            # Grid has already logged the actual encoded message. These local
+            # copies are used only to reuse Flower's sample-weighted aggregation.
+            decoded = copy(reply)
+            decoded.content = RecordDict({"arrays": ArrayRecord(delta), "metrics": reply.content["metrics"]})
+            decoded_replies.append(decoded)
+        average_delta, metrics = super().aggregate_train(server_round, decoded_replies)
+        delta_state = average_delta.to_torch_state_dict()
+        state = {name: base + delta_state[name] for name, base in self.reference.items()}
+        if any(not torch.isfinite(value).all() for value in state.values()):
+            raise ValueError("QSGD aggregation produced nonfinite weights")
+        arrays = ArrayRecord(state)
+        self.current = (server_round, arrays, dict(metrics))
+        return arrays, metrics
+
+
 @app.main()
 def main(grid: Grid, context: Context):
     config = dict(context.run_config)
+    method, levels = compression_settings(config)
+    config.update({"compression": method, "qsgd-levels": levels})
     manifest = read_manifest(config["manifest"], config["num-classes"], config["num-clients"])
     seed_everything(config["seed"])
     model = Net(config["num-classes"])
-    experiment = Experiment(config["output-dir"], "fedavg", config, manifest, "round")
-    strategy = CheckpointFedAvg(experiment, config["num-clients"])
+    experiment = Experiment(config["output-dir"], "fedavg-qsgd" if method == "qsgd" else "fedavg", config, manifest, "round")
+    experiment.metadata["compression"] = dict(
+        method=method, codec=CODEC if method == "qsgd" else None,
+        target="client model deltas" if method == "qsgd" else "full client models",
+        normalization="one L2 norm per tensor" if method == "qsgd" else None,
+        downlink="uncompressed", error_feedback=False,
+        rng="SeedSequence([seed, round, partition_id, 0x51534744]); sorted tensor names" if method == "qsgd" else None)
+    strategy = (QSGDFedAvg(experiment, config["num-clients"], levels) if method == "qsgd"
+                else CheckpointFedAvg(experiment, config["num-clients"]))
     result = strategy.start(
         grid=MeasuredGrid(grid, strategy.communication), initial_arrays=ArrayRecord(model.state_dict()),
         train_config=ConfigRecord({"lr": config["learning-rate"]}),

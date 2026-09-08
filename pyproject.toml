@@ -18,7 +18,7 @@ dependencies = [
 dev = ["pytest>=8,<10"]
 
 [tool.setuptools.packages.find]
-include = ["flower_face*"]
+include = ["flower_face*", "compression*"]
 
 [tool.flwr.app]
 publisher = "local"
@@ -30,6 +30,8 @@ clientapp = "flower_face.client_app:app"
 [tool.flwr.app.config]
 num-server-rounds = 3
 evaluate-final-test = false
+compression = "none"
+qsgd-levels = 127
 num-clients = 4
 num-classes = 10
 local-epochs = 1
