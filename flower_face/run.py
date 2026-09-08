@@ -16,7 +16,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rounds", type=int)
     parser.add_argument("--manifest", type=Path)
-    parser.add_argument("--skip-test", action="store_true", help="Use validation only during experiment development")
+    test_options = parser.add_mutually_exclusive_group()
+    test_options.add_argument("--skip-test", action="store_true", help="Use validation only (project default)")
+    test_options.add_argument("--evaluate-test", action="store_true", help="Evaluate the validation-selected checkpoint on held-out test data")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     config = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["flwr"]["app"]["config"]
@@ -29,6 +31,8 @@ def main():
     config["manifest"] = manifest.as_posix()
     if args.skip_test:
         config["evaluate-final-test"] = False
+    if args.evaluate_test:
+        config["evaluate-final-test"] = True
     config["output-dir"] = (root / config["output-dir"]).as_posix()
     runtime = root / ".flwr"
     runtime.mkdir(exist_ok=True)

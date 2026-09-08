@@ -1,19 +1,60 @@
-"""Ordinary full-participation FedAvg and a final held-out test evaluation."""
-
-from datetime import datetime, timezone
-import hashlib
-from importlib.metadata import version
-import json
-from pathlib import Path
+"""Ordinary FedAvg with validation-selected and final model checkpoints."""
 
 from flwr.app import ArrayRecord, ConfigRecord, Context
 from flwr.serverapp import Grid, ServerApp
 from flwr.serverapp.strategy import FedAvg
 import torch
 
+from flower_face.experiment import Experiment
+from flower_face.communication import CommunicationLedger, MeasuredGrid
 from flower_face.task import Net, load_data, read_manifest, seed_everything, test
 
 app = ServerApp()
+
+
+class CheckpointFedAvg(FedAvg):
+    """Keep Flower's aggregation; record the model matching each validation round."""
+
+    def __init__(self, experiment, clients):
+        super().__init__(fraction_train=1.0, fraction_evaluate=1.0,
+                         min_train_nodes=clients, min_evaluate_nodes=clients,
+                         min_available_nodes=clients)
+        self.experiment = experiment
+        self.clients = clients
+        self.current = None
+        self.communication = CommunicationLedger(experiment)
+
+    def checked_replies(self, replies):
+        replies = list(replies)
+        if len(replies) != self.clients or any(reply.has_error() for reply in replies):
+            raise RuntimeError("A baseline round requires successful replies from all configured clients.")
+        if len({reply.metadata.src_node_id for reply in replies}) != self.clients:
+            raise RuntimeError("Duplicate client replies in a baseline round.")
+        return replies
+
+    def aggregate_train(self, server_round, replies):
+        arrays, metrics = super().aggregate_train(server_round, self.checked_replies(replies))
+        if arrays is None or metrics is None:
+            raise RuntimeError("Training aggregation returned no model or metrics.")
+        self.current = (server_round, arrays, dict(metrics))
+        return arrays, metrics
+
+    def aggregate_evaluate(self, server_round, replies):
+        metrics = super().aggregate_evaluate(server_round, self.checked_replies(replies))
+        if self.current is None or self.current[0] != server_round or metrics is None:
+            raise RuntimeError("Validation metrics do not match the current model round.")
+        _, arrays, train_metrics = self.current
+        improved = self.experiment.consider_best(
+            arrays.to_torch_state_dict(), server_round, metrics["eval_loss"], metrics["eval_acc"])
+        self.experiment.log_step(dict(round=server_round, train=train_metrics,
+                                      validation=dict(metrics), train_clients=self.clients,
+                                      validation_clients=self.clients, new_best=improved,
+                                      communication=self.communication.summary(server_round),
+                                      cumulative_communication=self.communication.summary()))
+        traffic = self.communication.summary(server_round)["total"]
+        print(f"Round {server_round} serialized objects: {traffic['serialized_object_bytes']:,} bytes "
+              f"({traffic['serialized_object_bits']:,} bits), {traffic['messages']} messages", flush=True)
+        return metrics
 
 
 @app.main()
@@ -22,41 +63,45 @@ def main(grid: Grid, context: Context):
     manifest = read_manifest(config["manifest"], config["num-classes"], config["num-clients"])
     seed_everything(config["seed"])
     model = Net(config["num-classes"])
-    clients = config["num-clients"]
-    strategy = FedAvg(fraction_train=1.0, fraction_evaluate=1.0,
-                      min_train_nodes=clients, min_evaluate_nodes=clients,
-                      min_available_nodes=clients)
+    experiment = Experiment(config["output-dir"], "fedavg", config, manifest, "round")
+    strategy = CheckpointFedAvg(experiment, config["num-clients"])
     result = strategy.start(
-        grid=grid, initial_arrays=ArrayRecord(model.state_dict()),
+        grid=MeasuredGrid(grid, strategy.communication), initial_arrays=ArrayRecord(model.state_dict()),
         train_config=ConfigRecord({"lr": config["learning-rate"]}),
         num_rounds=config["num-server-rounds"], timeout=120,
     )
     expected_rounds = set(range(1, config["num-server-rounds"] + 1))
     if (set(result.train_metrics_clientapp) != expected_rounds
-            or set(result.evaluate_metrics_clientapp) != expected_rounds):
-        raise RuntimeError("Some rounds have no train/evaluation results; inspect Flower logs.")
-    model.load_state_dict(result.arrays.to_torch_state_dict())
-    # Test images are evaluated only once after all training/validation rounds.
+            or set(result.evaluate_metrics_clientapp) != expected_rounds
+            or experiment.best is None):
+        raise RuntimeError("Incomplete training/validation history; inspect Flower logs.")
+    experiment.save_checkpoint("final_model.pt", result.arrays.to_torch_state_dict(),
+                               config["num-server-rounds"],
+                               dict(result.evaluate_metrics_clientapp[config["num-server-rounds"]]))
     test_metrics = None
-    if config.get("evaluate-final-test", True):
+    if config.get("evaluate-final-test", False):
+        # Selection is finished. Evaluate only the validation-selected model once.
+        checkpoint = torch.load(experiment.output / "best_model.pt", map_location="cpu", weights_only=True)
+        model.load_state_dict(checkpoint["state_dict"])
         loss, accuracy = test(model, load_data(config, split="test"))
-        test_metrics = {"loss": loss, "accuracy": accuracy}
-    output = Path(config["output-dir"]) / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    output.mkdir(parents=True, exist_ok=False)
-    torch.save({"state_dict": model.state_dict(), "identities": manifest["identities"],
-                "config": config}, output / "final_model.pt")
-    metrics = dict(config=config, image_variant=manifest["image_variant"],
-                   versions={name: version(name) for name in ("flwr", "torch", "torchvision", "numpy", "ray")},
-                   manifest_sha256=hashlib.sha256(Path(config["manifest"]).read_bytes()).hexdigest(),
-                   identities=manifest["identities"],
-                   train={str(k): dict(v) for k, v in result.train_metrics_clientapp.items()},
-                   validation={str(k): dict(v) for k, v in result.evaluate_metrics_clientapp.items()},
-                   test=test_metrics,
-                   model_parameters=sum(p.numel() for p in model.parameters()))
-    (output / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
-    (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    if test_metrics is not None:
-        print(f"Final held-out test: loss={test_metrics['loss']:.4f}, accuracy={test_metrics['accuracy']:.2%}")
+        test_metrics = dict(loss=loss, accuracy=accuracy, checkpoint="best_model.pt",
+                            round=experiment.best["step"])
+        print(f"Selected model held-out test: loss={loss:.4f}, accuracy={accuracy:.2%}")
     else:
         print("Held-out test skipped; use validation metrics for development.")
-    print(f"Saved checkpoint, metrics, and manifest to {output.resolve()}")
+    experiment.complete(dict(
+        config=config, image_variant=manifest["image_variant"],
+        versions=experiment.metadata["versions"], manifest_sha256=experiment.manifest_hash,
+        identities=manifest["identities"],
+        train={str(k): dict(v) for k, v in result.train_metrics_clientapp.items()},
+        validation={str(k): dict(v) for k, v in result.evaluate_metrics_clientapp.items()},
+        test=test_metrics, model_parameters=sum(p.numel() for p in model.parameters()),
+        final_checkpoint={"checkpoint": "final_model.pt", "round": config["num-server-rounds"]},
+        communication=strategy.communication.summary(),
+    ))
+    traffic = strategy.communication.summary()
+    print(f"Logical serialized communication: {traffic['total']['serialized_object_bytes']:,} bytes "
+          f"({traffic['total']['serialized_object_bits']:,} bits); "
+          f"downlink={traffic['downlink']['serialized_object_bytes']:,}, "
+          f"uplink={traffic['uplink']['serialized_object_bytes']:,}. Not network traffic.")
+    print(f"Saved best and final checkpoints, metrics, and manifest to {experiment.output.resolve()}")

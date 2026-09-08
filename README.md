@@ -15,11 +15,16 @@ Flower is pinned to 1.36.0; this project runs locally with four simulated client
 | --- | --- |
 | `flower_face/task.py` | Small CNN, image dataset, PyTorch training and evaluation; no Flower imports |
 | `flower_face/client_app.py` | Receive weights, train on one client, return weights and sample-weighted metrics |
-| `flower_face/server_app.py` | Initialize weights, run ordinary FedAvg, evaluate final test set, save results |
+| `flower_face/server_app.py` | Run ordinary FedAvg with validation checkpoint selection and optional test evaluation |
+| `flower_face/communication.py` | Measure serialized Flower object sizes and log training/validation upload and download totals |
+| `flower_face/experiment.py` | Shared checkpoint saving, experiment metadata, and incremental history; no Flower imports |
+| `flower_face/check_training.py` | Centralized and tiny-batch training diagnostics using the same CNN |
 | `flower_face/prepare_data.py` | Reproducible identity selection and disjoint image splits |
 | `flower_face/run.py` | Thin wrapper around `flwr run . local --stream`; supplies absolute local paths and four clients |
 | `pyproject.toml` | Dependencies, Flower entry points, experiment defaults |
 | `tests/test_baseline.py` | Split integrity and actual Flower training/evaluation message handlers |
+| `tests/test_checkpoints.py` | Checkpoint/round matching, tie handling, and isolation of test evaluation |
+| `tests/test_communication.py` | Serialization round trip, byte counts, per-recipient accounting, and partial failures |
 
 ## Environment
 
@@ -100,7 +105,8 @@ Both checks reuse `task.py` and print training accuracy; centralized training al
 prints validation accuracy each epoch. Their checkpoints and metric histories go
 to `outputs/overfit-<timestamp>/` or `outputs/centralized-<timestamp>/`. Neither
 check evaluates the held-out test set. `--skip-test` likewise records `test: null`
-for federated runs. Omit that flag only when ready to evaluate chosen settings.
+for federated runs. Test evaluation is now disabled by default; use
+`--evaluate-test` explicitly when ready to evaluate chosen settings.
 
 Thirty centralized epochs and thirty one-local-epoch federated rounds each expose
 every training image thirty times, but have different optimizer update sequences;
@@ -139,6 +145,18 @@ identity in these annotations, so requesting 40–50 per identity will fail.
 
 ## Results and checks
 
+Checkpoint selection and experiment logging were added on 2026-09-08. New runs
+save both the lowest-validation-loss model and the final model. Historical runs
+below used the earlier final-checkpoint-only implementation.
+
+Verification: eight automated tests passed, including actual FedAvg aggregation
+with controlled replies where the best and final rounds differ, tie handling,
+and optional test evaluation of only the selected model. Short centralized and
+overfit checks passed. A real four-client, three-round simulation completed with
+zero failed client replies and the test skipped. Its artifacts are in
+`outputs/fedavg-20260908T094207104136Z/`. The saved best model reproduced its
+recorded validation metrics when reloaded.
+
 Verified on 2026-09-07: the full three-round Flower simulation completed using
 the 300 selected **aligned/cropped images** from `img_align_celeba/`. Every round
 received four training replies and four validation replies with zero failed
@@ -168,12 +186,66 @@ limitation; use WSL2/Linux for stable thesis experiments if it persists. No libr
 code was patched or errors hidden. An earlier synthetic runtime check is separately
 labelled `synthetic-runtime-check` in its output manifest and metrics.
 
-Each completed run creates a timestamped directory under `outputs/` containing:
+## Checkpoint selection and experiment records
 
-- `final_model.pt`: state dictionary, original identity IDs, and run configuration.
-- `metrics.json`: round training/validation metrics, final test metrics, model size,
-  image variant, identity IDs, package versions, run configuration, and manifest hash.
+The selection rule is fixed before training: **lowest validation loss**, with the
+earlier epoch/round retained on an exact tie. Accuracy is recorded but does not
+break ties or override loss. Round zero is not a candidate. No early stopping or
+learning-rate change is introduced: every requested epoch/round still runs.
+
+The Flower strategy remains standard sample-weighted FedAvg. A small subclass
+records the aggregated model after training and selects it using the subsequent
+sample-weighted validation loss. Both phases must return successful replies from
+all four distinct clients; an incomplete round stops the baseline run.
+
+New federated runs use `outputs/fedavg-<UTC timestamp>/`. Centralized runs retain
+their `centralized-` prefix. The directory is created at the start and contains:
+
+- `best_model.pt`: weights from the selected validation epoch/round, including its
+  metrics, step number, identity mapping, configuration, and manifest hash.
+- `best_checkpoint.json`: a short description of the selected checkpoint.
+- `final_model.pt`: weights from the last completed step of a successful run.
+- `history.jsonl`: one JSON entry per completed epoch/round, written immediately;
+  federated records include successful client counts and whether a new best was saved.
+- `experiment.json`: configuration, package/Python versions, platform, split counts,
+  selection rule, elapsed time, and completion status.
+- `metrics.json`: full completed-run metrics, selected checkpoint information, and
+  optional held-out test result (null when skipped).
 - `manifest.json`: a copy of the exact selected images and split assignments.
+
+Federated `train_loss` is the sample-weighted average loss during client updates;
+it is not a fresh evaluation of the aggregated global model. Centralized
+`train_loss` is evaluated after the epoch; `optimization_loss` records the loss
+during its updates. Validation loss always evaluates the model being considered
+for checkpoint selection. This distinction matters when comparing learning curves.
+
+Best checkpoints and JSON summaries use temporary-file replacement. If a run
+is interrupted, completed history entries and the latest saved best checkpoint
+remain available; the experiment status stays `incomplete`. These are model
+checkpoints, not a full optimizer/RNG resume facility.
+
+The tiny-batch overfit check has no validation set, so it saves only a final model
+and logs, without declaring a best validation checkpoint. Centralized training
+always skips the test set. An effective `--lr` override is stored in its config.
+
+For ordinary development:
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.run --rounds 300
+.venv\Scripts\python.exe -m flower_face.check_training centralized --epochs 100 --lr 0.01
+```
+
+Only after the experiment settings and selection protocol have been chosen:
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.run --rounds 300 --evaluate-test
+```
+
+This starts a fresh run, selects a model using validation alone, then evaluates
+**that selected model once** on the held-out test set. Its test record names the
+checkpoint and round. `--skip-test` remains supported and is mutually exclusive
+with `--evaluate-test`. Earlier runs cannot acquire best checkpoints retroactively:
+their intermediate weights were never saved.
 
 ```powershell
 .venv\Scripts\python.exe -m pytest -q
@@ -188,6 +260,123 @@ before integrating them into client/server messaging. Read the source papers in
 Then compare uncompressed, QSGD, QSGD + LLZ-p, LLZ-SI, and Top-k with matched
 data, initialization, and training settings, extending to non-IID partitions.
 
-This baseline does **not** measure actual transmitted bits. Model parameter counts
-are not network traffic: later accounting must include serialization, metadata,
-and both transmission directions with a documented measurement boundary.
+The baseline now measures logical serialized message sizes at the boundary
+described below. Actual network traffic still needs transport instrumentation;
+do not label these counters as packet-level transmitted bits in thesis results.
+
+## Communication accounting
+
+New federated runs automatically measure messages in both directions, separately
+for training and validation. FedAvg, model updates, checkpoint selection, and the
+data split are unchanged. The instrumentation adds no client/server messages.
+
+The measurement boundary is **a full Flower Message object graph per logical
+recipient**, observed at the server's Grid interface. The project is pinned to
+Flower 1.36.0. Outgoing instructions are measured after Grid dispatch returns
+(or raises), when Flower has populated routing metadata; incoming replies are
+measured before aggregation can change their arrays. A submitted instruction is
+counted even if no reply arrives; its delivery is not assumed. Error replies are
+counted too. The final held-out test runs locally on the server and adds no
+federated message cost.
+
+Three sizes are reported, all as integer bytes:
+
+| Field | Meaning |
+| --- | --- |
+| `raw_array_bytes` | Numeric storage: sum of shape elements × dtype size for every named array |
+| `array_data_bytes` | Actual encoded array buffers: `len(Array.data)`, including NumPy serialization headers |
+| `serialized_object_bytes` | Actual byte lengths from Flower's `deflate()` for the Message and every unique descendant object |
+| `serialized_object_bits` | Exactly eight times `serialized_object_bytes` |
+
+Flower's `deflate()` here means object serialization, not a compression algorithm
+we have added. The object graph includes array chunks, shapes and dtypes, names,
+configuration, metrics, message metadata, object headers, and child references.
+Measuring the Message alone would miss its model data, which lives in descendant
+objects. See Flower's [Message serialization API](https://flower.ai/docs/framework/1.33/en/ref-api/flwr.app.Message.html)
+for the object/children interface; the implementation uses the installed 1.36.0 source.
+
+Identical objects are counted once **within each message**, matching Flower's
+object-ID representation. The full graph is counted again for each recipient,
+phase, and round. No cross-message or runtime cache savings are assumed. The raw
+and array-buffer counters count every named array, including duplicates; because
+serialized graphs can share identical objects, subtracting the raw counter from
+the serialized counter is not a reliable measure of metadata overhead. The
+per-message log instead breaks serialized bytes down by object type.
+
+These are **logical serialized object sizes, not measured network traffic**.
+The counters exclude separate RPC envelopes/object-tree announcements, transport
+headers, acknowledgements, polling, retries, and runtime control traffic. They
+also exclude app packaging, local dataset reads, and checkpoint files. Runtime
+deduplication or caching can reduce transfers, while transport overhead or retries
+can increase them; this metric is not a bound on actual network bytes.
+
+For this 89,834-parameter float32 CNN, one raw model is **359,336 bytes**. With four
+clients and validation every round, the expected raw-array accounting is:
+
+| Phase | Direction | Messages per round | Raw array bytes per round |
+| --- | --- | ---: | ---: |
+| Training | Download to clients | 4 | 1,437,344 |
+| Training | Upload to server | 4 | 1,437,344 |
+| Validation | Download to clients | 4 | 1,437,344 |
+| Validation | Upload metrics to server | 4 | 0 |
+| Total | Both directions | 16 | 4,312,032 |
+
+Validation requires another model download to every client. Its metric-only
+replies contain zero array bytes but still have a nonzero serialized size. Compare
+training communication separately from validation communication when studying
+compression; the evaluation schedule must be matched across methods.
+
+Every new federated output directory adds:
+
+- `communication_messages.jsonl`: one observation per message, with round, phase,
+  direction, client node ID, routing IDs, error flag, sizes, and an object-type
+  breakdown. Node IDs identify simulation participants, not dataset identities.
+- `communication.json`: the measurement definition, totals, and per-round counts.
+  Each summary has total, upload, download, training, and validation breakdowns.
+- `history.jsonl`: each completed round now includes `communication` and
+  `cumulative_communication`, alongside its validation metrics.
+- `metrics.json`: includes the completed run's `communication` summary.
+- `experiment.json`: includes the measurement definition with existing version
+  and configuration information.
+
+The message log and summary are written after each Grid exchange. If an exchange
+raises, submitted messages and replies already yielded by Grid are retained.
+Hard termination during an exchange can leave that exchange unrecorded; check
+the experiment's completion status before using totals. All counts and summaries
+remain server-side and do not add accounting fields to transmitted payloads.
+Measurement and disk logging add runtime overhead, so wall-clock times from old
+uninstrumented runs are not directly comparable.
+
+Use the same commands; accounting is enabled automatically:
+
+```powershell
+# Short check of all four message paths.
+.venv\Scripts\python.exe -m flower_face.run --rounds 3
+
+# A fresh baseline experiment with recorded communication costs.
+.venv\Scripts\python.exe -m flower_face.run --rounds 300
+```
+
+Previous experiment folders are preserved. Their exact serialized counts cannot
+be recovered from parameter counts or saved checkpoints alone. Future compressed
+runs must also define their codec payload/metadata format independently of Flower
+and retain the same logical-message measurement boundary for fair comparisons.
+
+Verified on 2026-09-08: all 13 automated tests passed, including complete message
+reconstruction through Flower's serializer, shared-array deduplication, metadata
+costs, repeated recipients/rounds, and partial-error logging. A real three-round
+CelebA run completed with four successful training and validation replies each
+round, 48 logged messages, matching per-message/round/cumulative totals, and the
+test skipped. Results: `outputs/fedavg-20260908T100652995585Z/` (Flower run
+`9923936832386669839`). The existing native Windows Ray shutdown traces remain.
+
+| Measured serialized object bytes | Per round in this check | Three-round total |
+| --- | ---: | ---: |
+| Training, both directions | 2,915,706 | 8,747,118 |
+| Validation, both directions | 1,459,342 | 4,378,026 |
+| Total | 4,375,048 | 13,125,144 |
+
+The total is 105,001,152 serialized object bits across the three rounds. Byte
+counts may vary with routing metadata, serialization, or object sharing; these
+observed sizes are not hard-coded into the measurement. The saved best and final
+checkpoints both belong to round three in this short pipeline check.

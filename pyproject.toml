@@ -29,7 +29,7 @@ clientapp = "flower_face.client_app:app"
 
 [tool.flwr.app.config]
 num-server-rounds = 3
-evaluate-final-test = true
+evaluate-final-test = false
 num-clients = 4
 num-classes = 10
 local-epochs = 1

@@ -1,9 +1,6 @@
 """Overfit a tiny training batch or train centrally; never read the test split."""
 
 import argparse
-from datetime import datetime, timezone
-import hashlib
-import json
 from pathlib import Path
 import tomllib
 
@@ -11,6 +8,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from flower_face.task import Net, load_data, read_manifest, seed_everything, test, train
+from flower_face.experiment import Experiment
 
 
 def main():
@@ -30,6 +28,8 @@ def main():
     model = Net(config["num-classes"])
     loader = load_data(config, split="train")
     lr = args.lr if args.lr is not None else (0.1 if args.mode == "overfit" else config["learning-rate"])
+    config["learning-rate"] = lr
+    config["evaluate-final-test"] = False
     if args.mode == "overfit":
         # One fixed training image per identity; no validation/test samples.
         seen, indices = set(), []
@@ -51,6 +51,8 @@ def main():
         iterations = args.epochs
         selected = loader.dataset.rows
     print(f"{args.mode}: {len(loader.dataset)} training images, SGD lr={lr}, CPU", flush=True)
+    experiment = Experiment(root / "outputs", args.mode, config, manifest,
+                            "epoch" if args.mode == "centralized" else "step")
     history = []
     for iteration in range(1, iterations + 1):
         # task.train uses stateless SGD (no momentum), so one-epoch calls preserve
@@ -62,7 +64,9 @@ def main():
         if validation_loader is not None:
             val_loss, val_acc = test(model, validation_loader)
             row.update(validation_loss=val_loss, validation_accuracy=val_acc)
+            row["new_best"] = experiment.consider_best(model.state_dict(), iteration, val_loss, val_acc)
         history.append(row)
+        experiment.log_step(row)
         if args.mode == "centralized" or iteration == 1 or iteration % 25 == 0 or iteration == iterations:
             message = f"{iteration:4d}/{iterations}: train loss={train_loss:.4f}, accuracy={train_acc:.1%}"
             if validation_loader is not None:
@@ -73,16 +77,15 @@ def main():
             break
     if args.mode == "overfit" and not (history[-1]["train_accuracy"] == 1.0 and history[-1]["train_loss"] < 0.05):
         print("Tiny batch has not reached the target yet; inspect the learning curve before proceeding.", flush=True)
-    output = root / "outputs" / f"{args.mode}-{datetime.now(timezone.utc):%Y%m%dT%H%M%S%fZ}"
-    output.mkdir(parents=True)
     metrics = dict(mode=args.mode, config=config, learning_rate=lr, history=history,
                    image_variant=manifest["image_variant"], training_examples=selected,
-                   manifest_sha256=hashlib.sha256(Path(config["manifest"]).read_bytes()).hexdigest(),
+                   manifest_sha256=experiment.manifest_hash, versions=experiment.metadata["versions"],
+                   requested_iterations=iterations, completed_iterations=len(history),
                    test_evaluated=False)
-    (output / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
-    torch.save(dict(state_dict=model.state_dict(), config=config, identities=manifest["identities"]),
-               output / "final_model.pt")
-    print(f"Saved results: {output}", flush=True)
+    experiment.save_checkpoint("final_model.pt", model.state_dict(), len(history),
+                               {k: v for k, v in history[-1].items() if k.startswith("validation_")} or None)
+    experiment.complete(metrics)
+    print(f"Saved results: {experiment.output.resolve()}", flush=True)
 
 
 if __name__ == "__main__":
