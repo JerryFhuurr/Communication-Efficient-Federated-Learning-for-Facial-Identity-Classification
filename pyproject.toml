@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flower-face-demo"
+version = "0.1.0"
+description = "A small CelebA identity classification baseline with Flower and PyTorch"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "flwr[simulation]==1.36.0",
+    "torch==2.6.0",
+    "torchvision==0.21.0",
+    "Pillow>=10,<12",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+
+[tool.setuptools.packages.find]
+include = ["flower_face*"]
+
+[tool.flwr.app]
+publisher = "local"
+
+[tool.flwr.app.components]
+serverapp = "flower_face.server_app:app"
+clientapp = "flower_face.client_app:app"
+
+[tool.flwr.app.config]
+num-server-rounds = 3
+evaluate-final-test = true
+num-clients = 4
+num-classes = 10
+local-epochs = 1
+batch-size = 16
+learning-rate = 0.01
+seed = 42
+image-size = 64
+manifest = "data/subset/manifest.json"
+output-dir = "outputs"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

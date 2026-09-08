@@ -1,0 +1,14 @@
+.venv/
+.uv-cache/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+*.zip
+*.7z*
+*.fab
+data/
+img_align_celeba/
+outputs/
+identity_CelebA.txt
+list_eval_partition.txt
+.flwr/
