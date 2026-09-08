@@ -11,6 +11,19 @@ import platform
 import time
 
 import torch
+from flower_face.reproducibility import settings, source_hash
+
+
+def atomic_replace(temporary, target):
+    """Allow brief Windows reader/scanner locks; still fail on persistent errors."""
+    for attempt in range(8):
+        try:
+            temporary.replace(target)
+            return
+        except PermissionError as error:
+            if getattr(error, 'winerror', None) not in (5, 32, 33) or attempt == 7:
+                raise
+            time.sleep(min(0.01 * 2**attempt, 0.2))
 
 
 class Experiment:
@@ -31,6 +44,7 @@ class Experiment:
             split_counts=dict(Counter(row["split"] for row in manifest["examples"])),
             versions={name: version(name) for name in ("flwr", "torch", "torchvision", "numpy", "ray")},
             python=platform.python_version(), platform=platform.platform(),
+            reproducibility=settings(), source_sha256=source_hash(),
         )
         self.write_json("experiment.json", self.metadata)
         self.write_json("manifest.json", manifest)
@@ -40,7 +54,7 @@ class Experiment:
         target = self.output / name
         temporary = target.with_suffix(target.suffix + ".tmp")
         temporary.write_text(json.dumps(data, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-        temporary.replace(target)
+        atomic_replace(temporary, target)
 
     def save_checkpoint(self, name, state_dict, step, validation=None):
         target = self.output / name
@@ -51,7 +65,7 @@ class Experiment:
             step=step, step_kind=self.step_kind, validation=validation,
             manifest_sha256=self.manifest_hash,
         ), temporary)
-        temporary.replace(target)
+        atomic_replace(temporary, target)
 
     def consider_best(self, state_dict, step, loss, accuracy):
         if not math.isfinite(loss) or not math.isfinite(accuracy):

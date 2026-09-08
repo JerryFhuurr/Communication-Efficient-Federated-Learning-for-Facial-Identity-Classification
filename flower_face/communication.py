@@ -13,7 +13,7 @@ import numpy as np
 
 
 MEASUREMENT = {
-    "schema_version": 2,
+    "schema_version": 4,
     "boundary": "logical per-recipient Flower Message object graph at the server Grid boundary",
     "serializer": "Flower 1.36 deflate() on Message and all unique descendant objects",
     "observation": "outgoing messages after Grid dispatch returns or raises; incoming replies before aggregation",
@@ -22,7 +22,7 @@ MEASUREMENT = {
     "uplink": "client-to-server replies returned by Grid, including error replies",
     "raw_array_bytes": "sum of shape elements times dtype itemsize for every named array (including duplicates)",
     "array_data_bytes": "sum of len(Array.data) for every named array, including NumPy headers and duplicates",
-    "codec_payload_bytes": "sum of QSD1 byte packets in the qsgd ConfigRecord, including each packet header and padding",
+    "codec_payload_bytes": "sum of QSD1 or QLP1 byte packets in the qsgd ConfigRecord, including each packet header and padding",
     "serialized_object_bytes": "sum of len(object.deflate()) for each unique object in one message",
     "bits": "8 times serialized_object_bytes",
     "includes": ["array data and headers", "array names, shapes, and dtypes", "configuration and metrics",
@@ -94,6 +94,8 @@ class CommunicationLedger:
                            message_id=message.metadata.message_id,
                            reply_to_message_id=message.metadata.reply_to_message_id,
                            run_id=message.metadata.run_id, has_error=message.has_error(), **sizes)
+                client = message.content.config_records.get("client") if message.has_content() else None
+                row["client_partition_id"] = client.get("partition-id") if client is not None else None
                 stream.write(json.dumps(row, allow_nan=False) + "\n")
                 bucket.update({"messages": 1, "error_messages": int(message.has_error()),
                                **{key: sizes[key] for key in COUNTERS if key in sizes}})

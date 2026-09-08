@@ -10,7 +10,8 @@ import torch
 from flower_face.experiment import Experiment
 from flower_face.communication import CommunicationLedger, MeasuredGrid
 from flower_face.task import Net, load_data, read_manifest, seed_everything, test
-from flower_face.updates import CODEC, compression_settings, decode_update
+from flower_face.updates import CODECS, compression_settings, decode_update, llz_settings
+from flower_face.reproducibility import model_hash
 
 app = ServerApp()
 
@@ -25,6 +26,7 @@ class CheckpointFedAvg(FedAvg):
         self.experiment = experiment
         self.clients = clients
         self.current = None
+        self.node_partitions = {}
         self.communication = CommunicationLedger(experiment)
 
     def checked_replies(self, replies):
@@ -33,7 +35,20 @@ class CheckpointFedAvg(FedAvg):
             raise RuntimeError("A baseline round requires successful replies from all configured clients.")
         if len({reply.metadata.src_node_id for reply in replies}) != self.clients:
             raise RuntimeError("Duplicate client replies in a baseline round.")
-        return replies
+        partitions = []
+        for reply in replies:
+            record = reply.content.get("client")
+            partition = record.get("partition-id") if isinstance(record, ConfigRecord) else None
+            if type(partition) is not int or not 0 <= partition < self.clients:
+                raise RuntimeError("Every reply must identify a valid dataset partition-id")
+            node = reply.metadata.src_node_id
+            if node in self.node_partitions and self.node_partitions[node] != partition:
+                raise RuntimeError("Client partition changed within this run")
+            partitions.append(partition)
+        if set(partitions) != set(range(self.clients)):
+            raise RuntimeError("Replies must cover every dataset partition exactly once")
+        self.node_partitions.update({r.metadata.src_node_id: p for r, p in zip(replies, partitions)})
+        return [reply for _, reply in sorted(zip(partitions, replies), key=lambda item: item[0])]
 
     def aggregate_train(self, server_round, replies):
         arrays, metrics = super().aggregate_train(server_round, self.checked_replies(replies))
@@ -52,6 +67,7 @@ class CheckpointFedAvg(FedAvg):
         self.experiment.log_step(dict(round=server_round, train=train_metrics,
                                       validation=dict(metrics), train_clients=self.clients,
                                       validation_clients=self.clients, new_best=improved,
+                                      model_sha256=model_hash(arrays.to_torch_state_dict()),
                                       communication=self.communication.summary(server_round),
                                       cumulative_communication=self.communication.summary()))
         traffic = self.communication.summary(server_round)["total"]
@@ -63,9 +79,14 @@ class CheckpointFedAvg(FedAvg):
 class QSGDFedAvg(CheckpointFedAvg):
     """Decode client deltas, average with FedAvg weights, then add to round base."""
 
-    def __init__(self, experiment, clients, levels):
+    def __init__(self, experiment, clients, levels, *, method="qsgd", llz_p=0, llz_window=128):
         super().__init__(experiment, clients)
         self.levels = levels
+        compression_settings({"compression": method, "qsgd-levels": levels,
+                              "llz-p": llz_p, "llz-window": llz_window})
+        if method not in CODECS:
+            raise ValueError("Delta strategy requires a QSGD method")
+        self.method, self.llz_p, self.llz_window = method, llz_p, llz_window
         self.reference = None
         self.reference_round = None
 
@@ -80,11 +101,13 @@ class QSGDFedAvg(CheckpointFedAvg):
             raise RuntimeError("QSGD aggregation has no matching round reference")
         decoded_replies = []
         for reply in replies:
-            delta = decode_update(reply.content, self.reference, levels=self.levels, server_round=server_round)
+            delta = decode_update(reply.content, self.reference, levels=self.levels, server_round=server_round,
+                                  method=self.method, llz_p=self.llz_p, llz_window=self.llz_window)
             # Grid has already logged the actual encoded message. These local
             # copies are used only to reuse Flower's sample-weighted aggregation.
             decoded = copy(reply)
-            decoded.content = RecordDict({"arrays": ArrayRecord(delta), "metrics": reply.content["metrics"]})
+            decoded.content = RecordDict({"arrays": ArrayRecord(delta), "metrics": reply.content["metrics"],
+                                          "client": reply.content["client"]})
             decoded_replies.append(decoded)
         average_delta, metrics = super().aggregate_train(server_round, decoded_replies)
         delta_state = average_delta.to_torch_state_dict()
@@ -101,17 +124,23 @@ def main(grid: Grid, context: Context):
     config = dict(context.run_config)
     method, levels = compression_settings(config)
     config.update({"compression": method, "qsgd-levels": levels})
+    p, window = llz_settings(config) if method == "qsgd-llz" else (0, 128)
+    if method == "qsgd-llz":
+        config.update({"llz-p": p, "llz-window": window})
     manifest = read_manifest(config["manifest"], config["num-classes"], config["num-clients"])
     seed_everything(config["seed"])
     model = Net(config["num-classes"])
-    experiment = Experiment(config["output-dir"], "fedavg-qsgd" if method == "qsgd" else "fedavg", config, manifest, "round")
+    experiment = Experiment(config["output-dir"], "fedavg-"+method if method != "none" else "fedavg", config, manifest, "round")
+    experiment.metadata["initial_model_sha256"] = model_hash(model.state_dict())
     experiment.metadata["compression"] = dict(
-        method=method, codec=CODEC if method == "qsgd" else None,
-        target="client model deltas" if method == "qsgd" else "full client models",
-        normalization="one L2 norm per tensor" if method == "qsgd" else None,
+        method=method, codec=CODECS.get(method),
+        target="client model deltas" if method != "none" else "full client models",
+        normalization="one L2 norm per tensor" if method != "none" else None,
+        llz_p=p if method == "qsgd-llz" else None,
+        llz_window=window if method == "qsgd-llz" else None,
         downlink="uncompressed", error_feedback=False,
-        rng="SeedSequence([seed, round, partition_id, 0x51534744]); sorted tensor names" if method == "qsgd" else None)
-    strategy = (QSGDFedAvg(experiment, config["num-clients"], levels) if method == "qsgd"
+        rng="SeedSequence([seed, round, partition_id, 0x51534744]); sorted tensor names" if method != "none" else None)
+    strategy = (QSGDFedAvg(experiment, config["num-clients"], levels, method=method, llz_p=p, llz_window=window) if method != "none"
                 else CheckpointFedAvg(experiment, config["num-clients"]))
     result = strategy.start(
         grid=MeasuredGrid(grid, strategy.communication), initial_arrays=ArrayRecord(model.state_dict()),

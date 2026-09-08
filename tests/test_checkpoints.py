@@ -2,7 +2,7 @@ import json
 
 import pytest
 import torch
-from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
+from flwr.app import ArrayRecord, ConfigRecord, Context, Message, MetricRecord, RecordDict
 
 from flower_face.experiment import Experiment
 from flower_face import server_app
@@ -65,6 +65,7 @@ class ScriptedGrid:
                     "eval_loss": 0.5 if step == 1 else 0.75,
                     "eval_acc": 0.5 if step == 1 else 0.9, "num-examples": 10,
                 })})
+            content["client"] = ConfigRecord({"partition-id": msg.metadata.dst_node_id - 1})
             replies.append(Message(content=content, reply_to=msg))
         return replies
 

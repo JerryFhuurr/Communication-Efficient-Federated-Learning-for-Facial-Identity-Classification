@@ -19,6 +19,8 @@ Flower is pinned to 1.36.0; this project runs locally with four simulated client
 | `flower_face/communication.py` | Measure serialized Flower object sizes and log training/validation upload and download totals |
 | `compression/qsgd.py` | Standalone L2 QSGD quantizer and dense byte codec; no Flower or PyTorch imports |
 | `flower_face/updates.py` | Adapt model deltas to named QSGD byte packets and validate incoming updates |
+| `flower_face/reproducibility.py` | Stable model/source hashes and recorded deterministic settings |
+| `flower_face/study.py` | Replay checks, paired seed experiments, and aggregate study summaries |
 | `compression/check_qsgd.py` | Synthetic codec size/error check with a saved JSON report |
 | `flower_face/experiment.py` | Shared checkpoint saving, experiment metadata, and incremental history; no Flower imports |
 | `flower_face/check_training.py` | Centralized and tiny-batch training diagnostics using the same CNN |
@@ -30,6 +32,7 @@ Flower is pinned to 1.36.0; this project runs locally with four simulated client
 | `tests/test_communication.py` | Serialization round trip, byte counts, per-recipient accounting, and partial failures |
 | `tests/test_qsgd.py` | Quantization statistics, binary round trips, exact sizes, edge cases, and malformed input |
 | `tests/test_qsgd_flower.py` | Client/server integration, weighted delta aggregation, serialization, and codec accounting |
+| `tests/test_reproducibility.py` | Reply-order invariance, replay guards, paired statistics, and source snapshots |
 
 ## Environment
 
@@ -411,8 +414,9 @@ packet. The default `s=127` uses seven magnitude bits plus one sign bit per
 coordinate, with additional packet metadata. There is no error feedback.
 
 Uploads carry `qsgd: ConfigRecord({tensor_name: packet_bytes})`, plus an `update`
-ConfigRecord naming the codec, server round, and levels, and the usual training
-metrics. No full model or decoded update is included in that reply. Bytes in a
+ConfigRecord naming the codec, server round, and levels, the usual training
+metrics, and a `client` ConfigRecord with the dataset partition ID. No full model
+or decoded update is included in that reply. Bytes in a
 ConfigRecord follow Flower's [custom-message approach](https://flower.ai/docs/framework/tutorial-series-customize-the-client-pytorch.html).
 
 The server validates the round, codec, levels, exact tensor names, shapes,
@@ -433,8 +437,8 @@ Codec randomness uses its own NumPy Generator initialized from
 `SeedSequence([seed, server_round, partition_id, 0x51534744])`, visiting tensor
 names in sorted order. It does not consume PyTorch or global NumPy RNG state.
 The seed, round, and partition ID separate the streams from those of other
-clients/rounds and from training. Multi-worker execution can still introduce
-floating-point variation between independent runs.
+clients/rounds and from training. New runs sort replies by dataset partition ID
+before both training and validation aggregation. See the reproducibility checks below.
 
 QSGD experiments use `outputs/fedavg-qsgd-<timestamp>/`. Configuration records
 `compression` and `qsgd-levels`; experiment metadata documents the update target,
@@ -502,3 +506,335 @@ only 40 validation images, so the accuracy/loss differences do not establish
 superiority or equivalence. The chosen models follow the loss rule, not the peak
 accuracy row. Detailed checks and comparison are in
 `outputs/fedavg-qsgd-20260908T104659729947Z/baseline_comparison.json`.
+
+## Reproducibility and paired seed studies
+
+New runs use protocol `partition-order-v1`. Flower's original reduction adds
+updates in reply-list order, which can vary with scheduling. Floating-point sums
+can differ when that order changes. A controlled test demonstrated this effect;
+sorting by stable dataset partition IDs fixes this source of variation. Sorting
+by runtime node ID would not fix it because those IDs can change between runs.
+
+Every training and validation reply now includes a `client` ConfigRecord with
+`partition-id`. The server requires all partitions exactly once, rejects missing,
+duplicate, or changing partition identities, and aggregates in ascending partition
+order. This preserves the mathematical sample-weighted FedAvg rule, but can change
+floating-point results relative to old runs. Communication schema version 3 records
+`client_partition_id`; the additional transmitted metadata is counted in both modes.
+Use fresh runs of both methods under this protocol for paired comparisons.
+
+Seeding also enables `torch.use_deterministic_algorithms(True)`, uses one PyTorch
+thread, disables cuDNN benchmarking, and requests deterministic cuDNN algorithms.
+Unsupported nondeterministic operations raise rather than silently proceeding.
+The project currently trains on CPU. These controls follow
+[PyTorch's reproducibility guidance](https://docs.pytorch.org/docs/stable/notes/randomness.html);
+they do not promise bitwise agreement across hardware, library versions, or platforms.
+
+`experiment.json` records actual deterministic settings, an initial-model hash,
+and a source hash. Python files are hashed byte-for-byte; `pyproject.toml` is hashed
+by parsed values because Flower reformats TOML during packaging. Each completed
+federated round records `model_sha256`. Model hashes cover sorted tensor names,
+shapes, dtypes, and raw values, excluding checkpoint container timestamps and paths.
+
+`--seed` changes training initialization, local data order, and codec randomness.
+It does **not** regenerate the subset or alter train/validation/test membership.
+The manifest's original preparation seed and filename assignments remain fixed.
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.run --rounds 300 --seed 43 --compression none
+.venv\Scripts\python.exe -m flower_face.run --rounds 300 --seed 43 --compression qsgd --qsgd-levels 127
+```
+
+The study runner performs the reproducibility gate and paired comparisons:
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.study --seeds 42 43 44 --rounds 300 --repeat-rounds 3
+```
+
+It first runs each method twice for three rounds at the first seed, requiring
+identical model hashes, training/validation metrics, and selected-checkpoint
+metadata. Elapsed times, routing IDs, and serialized byte totals are excluded from
+exact replay comparisons: those can differ without changing the learned model.
+A replay failure stops the study before the long experiments. Passing a short
+replay is evidence for that configuration and duration, not a universal guarantee.
+
+After the gate, it runs each seed with uncompressed FedAvg and QSGD (`s=127` by
+default), alternating which method goes first across seed pairs. Runs are sequential
+and share the fixed manifest. Paired runs must have the same initialization hash,
+source, manifest hash, package versions, platform, training settings, and selection
+rule. The study always skips the held-out test. Replay checks are excluded from
+the seed statistics.
+
+Each study creates `outputs/study-<timestamp>/` containing:
+
+- `app/`: a snapshot of Python source and `pyproject.toml`, excluding images,
+  virtual environments, and outputs. Flower bundles this small directory for all
+  runs instead of repeatedly scanning the full project. Data stays in its original
+  local folder and is accessed through the absolute manifest path.
+- `replay-<method>-<repeat>/`: isolated check outputs and `terminal.log`.
+- `seed-<seed>-<method>/`: the full experiment artifacts and `terminal.log` for
+  each seed/method pair, with checkpoints, histories, and communication records.
+- `study.json`: settings, fingerprints, replay results, completed run records,
+  and progress/status; written after each completed run.
+- `summary.json`: means and **sample standard deviations** across seeds, plus
+  paired accuracy/loss differences and communication reductions for each seed.
+
+Study collection checks completion, client participation, communication totals,
+configuration, source/manifest fingerprints, and checkpoint hashes. A failed run
+stops the study and retains its logs; interrupted studies are labelled accordingly.
+There is no automatic resume. Individual `run` commands also accept `--output-dir`;
+each launch now writes a unique override TOML file to avoid shared-config overwrites.
+
+Checkpoint/JSON replacement retries brief Windows sharing/access locks up to
+eight attempts (under one second of total backoff), then raises if the error
+persists. This covers transient file readers or scanners while keeping atomic
+replacement. Study collection checks experiment completion even when Flower's
+streaming CLI exits with code zero after an application error; partial runs never
+enter the summary.
+
+Three training seeds on this fixed 40-image validation set are a preliminary
+robustness check. The reported standard deviation is variability across training
+seeds, not a confidence interval or a measure of dataset-sampling uncertainty.
+Report selected validation accuracy/loss together; do not replace the fixed
+minimum-loss selection rule with each run's peak accuracy after seeing results.
+
+### Completed paired study: seeds 42, 43, 44
+
+Results are saved in `outputs/study-20260908T114723972670Z/summary.json`, with
+full run records in `study.json`. All six 300-round runs completed. Each pair
+had the same initial-model hash, and the three seeds had different initial
+models. Both three-round replay checks matched model hashes and learning metrics
+exactly. Across the six long runs, all 28,800 recorded messages had successful
+replies where applicable; byte totals reconciled and checkpoint hashes matched
+their recorded rounds. The held-out test was skipped throughout.
+
+| Training seed | Selected round, none / QSGD | Validation accuracy, none / QSGD | Validation loss, none / QSGD |
+| --- | ---: | ---: | ---: |
+| 42 | 207 / 207 | 40.0% / 45.0% | 1.728491 / 1.721598 |
+| 43 | 300 / 300 | 17.5% / 17.5% | 2.132865 / 2.133377 |
+| 44 | 252 / 252 | 40.0% / 40.0% | 1.897066 / 1.914543 |
+
+| Across three training seeds | Uncompressed FedAvg | QSGD, s=127 |
+| --- | ---: | ---: |
+| Selected validation accuracy, mean +/- sample SD | 32.50% +/- 12.99 pp | 34.17% +/- 14.65 pp |
+| Selected validation loss, mean +/- sample SD | 1.919474 +/- 0.203116 | 1.923172 +/- 0.206025 |
+| Mean training upload serialized bytes per run | 437,598,600 | 109,557,048 |
+| Mean total serialized bytes per run | 1,312,943,496 | 984,902,844 |
+
+QSGD reduced training uploads by approximately **74.96%** and total counted
+serialized bytes by **24.99%** in each pair. These are logical serialized-object
+measurements including metadata, not captured network traffic. The paired selected
+accuracy difference was +1.67 percentage points on average (sample SD 2.89 pp).
+The small fixed validation set and large variation between training seeds do not
+establish an accuracy advantage or equivalence. Seed 43's selected checkpoint was
+the last round in both modes, so this experiment also does not establish convergence.
+
+Verification: **78 tests passed**, including arrival-order and runtime-node-ID
+permutations, replay mismatch detection, source snapshots, paired summaries, and
+transient Windows file-lock handling. Native Windows Ray access-violation traces
+still appeared in terminal logs, despite every study run completing successfully.
+The earlier failed development studies are retained separately and excluded from
+these results.
+
+## Standalone QSGD + LLZ-p codec
+
+The LLZ-p codec now follows the supplied revised manuscript's Section III and
+Algorithms 2/3. Source fingerprints, a reading guide, notation corrections, and
+the complete packet format are documented in `papers/README.md`. The source PDFs
+remain in their original local folder. The revised manuscript clarifies several
+indexing and decoding details from the older conference paper.
+
+- `compression/llz_p.py`: encode/decode signed integer symbols using the
+  reconstructed sliding-window dictionary; `parse` exposes inspectable triplets.
+- `compression/qsgd_llz.py`: encode already quantized tensors and preserve the
+  QSGD norm, levels, shape, and float dtype in a complete packet.
+- `compression/check_llz.py`: compare both packet formats on exactly the same
+  QSGD codes and save inputs, encoded packets, fingerprints, and measurements.
+- `tests/test_llz_p.py`: paper example, exhaustive reference comparisons,
+  lossless recovery, bounded lossy error, malformed packets, and byte accounting.
+
+`p` is an integer tolerance in signed quantization levels. At `p=0`, LLZ adds no
+error: recovered codes and QSGD-reconstructed floating-point bytes match exactly.
+At `p=1`, each code can differ by at most one level. The revised paper uses
+`s-1` intervals; its `s=128` corresponds to our existing `levels=127`. The
+QSGD quantizer and Flower training configuration have not changed.
+
+Run the standalone verification and comparison:
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests/test_llz_p.py -q
+.venv\Scripts\python.exe -m compression.check_llz --levels 127 --p 0 1 --window-size 128
+```
+
+The full default check (levels 3 and 127, p 0 and 1) completed at
+`outputs/llz-codec-20260908T123533255799Z/`. The table below shows the lossless
+second stage at `levels=127`, window 128, seed 42, and 4,096 float32 inputs:
+
+| Synthetic input | QSGD bytes | QSGD + LLZ-p, p=0 bytes | Additional savings |
+| --- | ---: | ---: | ---: |
+| Gaussian | 4,116 | 3,185 | 22.62% |
+| Gaussian with approximately 90% zeros | 4,116 | 1,039 | 74.76% |
+| Repeated pattern before stochastic quantization | 4,116 | 1,206 | 70.70% |
+| All zeros | 4,116 | 154 | 96.26% |
+
+These are complete standalone packet sizes, including QSGD metadata, LLZ headers,
+and padding. They are synthetic codec checks, not measurements of client updates
+or Flower/network traffic. Incompressible inputs can expand; the codec has no
+hidden fallback. The report also records the extra distortion for positive `p`.
+
+All **142 tests passed**, including 64 new LLZ tests. The manuscript's worked
+example reproduced its exact triplets and reconstructed sequence. The standalone
+modules import neither Flower nor PyTorch. The next integration step is to add
+`p=0` LLZ packets to Flower and verify identical model hashes against QSGD alone
+before comparing communication or testing lossy settings in training. LLZ-SI and
+error feedback remain future work; no federated experiment used LLZ in this stage.
+
+## Flower integration: lossless LLZ after QSGD
+
+`--compression qsgd-llz` now sends QLP1 packets containing QSGD-quantized model
+deltas followed by LLZ-p. Flower currently requires **`llz-p=0`**. Positive
+tolerances remain available in the standalone codec check, but are rejected in
+Flower until the lossless integration has been evaluated. Defaults are still
+uncompressed FedAvg; the new configuration entries are `llz-p=0` and
+`llz-window=128`.
+
+Both QSGD methods draw the same quantized symbols from the same isolated random
+stream, in sorted tensor-name order. LLZ encoding draws no additional randomness.
+Each tensor has its own dictionary. The server validates the codec tag, round,
+levels, LLZ tolerance/window in both the envelope and packet, tensor names,
+shapes, dtypes, and client sample counts before aggregating. Both methods use the
+same ordered sample-weighted delta aggregation and full-precision downloads.
+The standalone QLP1 decoder accepts optional expected tolerance/window arguments
+so the adapter checks these without decoding a packet repeatedly.
+
+The existing `qsgd` ConfigRecord holds byte packets for either method; its name
+does not identify their wire format. The `update` record identifies the codec.
+Communication schema 4 extends the packet-counter description to include QLP1.
+The measurement boundary and arithmetic are unchanged. Full serialized-message
+counts include the extra LLZ envelope metadata as well as every nested packet
+header and padding bit. Decoded tensors exist only at the server and are not
+counted as uploads.
+
+Run a single LLZ experiment:
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.run --rounds 10 --seed 42 --compression qsgd-llz --qsgd-levels 127 --llz-p 0 --llz-window 128 --skip-test
+```
+
+For an automatically checked pair, use:
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.check_llz --rounds 10 --seed 42 --qsgd-levels 127 --llz-window 128
+```
+
+`flower_face/check_llz.py` snapshots the application code, runs fresh QSGD and
+QSGD+LLZ experiments sequentially, and collects their completed artifacts. It
+requires equal source/data/environment fingerprints, configuration other than
+compression/output directory, and initialization hashes. It then requires exact
+equality of every round's model hash, training and validation metrics, and selected
+checkpoint metadata. Only after these checks pass does it report upload and total
+serialized-byte reductions. The check always skips the test set.
+
+Outputs are saved in `outputs/llz-flower-<timestamp>/comparison.json`, with each
+method's terminal log, checkpoints, history, and message accounting under its own
+directory. A failure stops the comparison, records a failed status, and retains
+logs. Routing IDs, timestamps, and byte totals can differ without affecting model
+equality; they are measured but excluded from the learning-equivalence check.
+Use `--rounds 300` for a longer paired experiment with the same validation rules.
+
+Verification: **178 tests passed**, including real Flower handler dispatch and
+serialization for the new method, unequal client sample weighting and reference
+refresh across rounds, exact multi-tensor QSGD/LLZ delta agreement, full-message
+accounting, incompatible packet rejection, and deliberately mismatched comparison
+results. The existing `flower_face.study` remains the uncompressed/QSGD seed study;
+use `flower_face.check_llz` for this new QSGD/LLZ pair.
+
+The first real CelebA comparison completed at
+`outputs/llz-flower-20260908T125215320610Z/comparison.json`: 10 rounds, four
+IID clients, seed 42, QSGD levels 127, LLZ p=0, window 128. Initial model hashes,
+every round's model hashes and learning metrics, and selected-checkpoint metadata
+matched exactly. Both methods selected round 10 (validation loss 2.303024,
+accuracy 12.5%). This short run verifies integration, not convergence or final
+recognition quality. The held-out test was skipped in both runs.
+
+| Complete serialized-object counts, 10 rounds | QSGD | QSGD + LLZ-p=0 |
+| --- | ---: | ---: |
+| Training upload bytes | 3,651,860 | 1,097,386 |
+| Training download bytes | 14,577,540 | 14,577,530 |
+| Validation upload + download bytes | 14,600,560 | 14,600,540 |
+| Total bytes | 32,829,960 | 30,275,456 |
+| Messages | 160 | 160 |
+| Error replies | 0 | 0 |
+
+The additional reduction versus QSGD alone was **69.95% for training uploads**
+and **7.78% for total serialized bytes**. Total savings are smaller because
+training and validation downloads still carry full-precision models. The small
+download/validation byte differences come from message metadata; model values
+were identical. All 320 message records reconcile with their phase and final
+totals. Native Windows Ray shutdown traces still appeared, although both runs
+completed successfully. No claim of captured network-traffic savings is made.
+
+## Three-seed 300-round lossless LLZ comparison
+
+Seeds **42, 43, and 44** have now completed paired QSGD and QSGD+LLZ-p=0
+experiments: six runs of 300 rounds, using the unchanged small CNN, four IID
+clients, QSGD levels 127, and LLZ window 128. All runs share the same source,
+dataset manifest, training configuration (apart from seed/method/output path),
+and recorded environment. Each seed uses a distinct model initialization on the
+same fixed data split.
+
+| Seed | Selected round | Validation accuracy, both methods | Training upload saved | Total serialized bytes saved |
+| --- | ---: | ---: | ---: | ---: |
+| 42 | 207 | 45.0% | 71.36% | 7.94% |
+| 43 | 300 | 17.5% | 72.51% | 8.07% |
+| 44 | 252 | 40.0% | 69.19% | 7.70% |
+
+Checkpoint selection uses the lowest validation loss, rather than the highest
+validation accuracy. Mean selected-checkpoint validation accuracy is **34.17%**
+with sample standard deviation **14.65 percentage points** for both methods.
+Mean upload reduction is **71.02%** (sample SD 1.69 percentage points); mean total
+reduction is **7.90%** (sample SD 0.19 percentage points).
+
+| Seed | QSGD upload bytes | LLZ upload bytes | QSGD total bytes | LLZ total bytes |
+| --- | ---: | ---: | ---: | ---: |
+| 42 | 109,556,748 | 31,380,383 | 984,901,644 | 906,728,879 |
+| 43 | 109,558,548 | 30,117,574 | 984,908,844 | 905,462,470 |
+| 44 | 109,556,748 | 33,756,207 | 984,901,644 | 909,102,903 |
+| Sum | 328,672,044 | 95,254,164 | 2,954,712,132 | 2,721,294,252 |
+
+The saved-artifact audit verified exact model hashes and training/validation
+metrics across **all 900 paired rounds**, plus identical selected checkpoints
+within each pair. All **28,800 message records** reconcile with their per-phase
+and final counts, with zero error replies in the six completed runs. The first
+seed-43 attempt stopped during round 1 with a Flower runtime task-token
+authentication failure; it was excluded and rerun with unchanged settings.
+
+These measurements include codec headers, padding, and Flower record/message
+metadata at the logical per-recipient serialization boundary. They are **not
+captured network traffic**. Full-precision training and validation downloads
+explain why the overall reduction is smaller than the upload reduction. At
+`p=0`, LLZ preserves the QSGD output exactly; QSGD itself remains lossy relative
+to the original floating-point updates.
+
+This completes the three-seed lossless integration comparison. Recognition
+quality remains variable across seeds, and the 40-image validation split is
+small. The sample standard deviations describe training-seed variation on one
+fixed split, not confidence intervals or performance on new data splits. The
+held-out test set was skipped in all six runs.
+
+Artifacts:
+
+- Seed 42: `outputs/llz-flower-20260908T125456428769Z/comparison.json`
+- Seed 43: `outputs/llz-flower-20260908T131541417935Z/comparison.json`
+- Seed 44: `outputs/llz-flower-20260908T132726021518Z/comparison.json`
+- Audited aggregate: `outputs/llz-three-seeds-20260908T132726021518Z/summary.json`
+- Audit script: `outputs/llz-three-seeds-20260908T132726021518Z/aggregate.py`
+- Excluded failed attempt: `outputs/llz-flower-20260908T130859648340Z/`
+
+The aggregate records source/data fingerprints, input report hashes, per-seed
+results, means, sample standard deviations, and exact byte totals. To repeat its
+audit while the working source still matches these experiments:
+
+```powershell
+.venv\Scripts\python.exe outputs/llz-three-seeds-20260908T132726021518Z/aggregate.py
+```

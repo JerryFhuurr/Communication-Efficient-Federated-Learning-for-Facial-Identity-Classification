@@ -14,9 +14,12 @@ from torchvision.transforms import Compose, Normalize, Resize, ToTensor
 
 def seed_everything(seed):
     random.seed(seed)
-    np.random.seed(seed)
+    np.random.seed(seed % (2**32))
     torch.manual_seed(seed)
     torch.set_num_threads(1)
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
 
 
 class Net(nn.Module):
