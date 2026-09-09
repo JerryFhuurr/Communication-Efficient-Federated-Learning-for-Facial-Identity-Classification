@@ -128,18 +128,18 @@ reference for these metrics is the QSGD reconstruction, so they do not mix LLZ
 distortion with QSGD's original quantization error. These metric fields are
 included in the serialized communication totals.
 
-For the complete three-method, three-seed comparison under one frozen source
-snapshot:
+For the complete three-seed comparison of uncompressed FedAvg, QSGD, and LLZ
+tolerances `p=0` and `p=1` under one frozen source snapshot:
 
 ```powershell
-.venv\Scripts\python.exe -m flower_face.compression_study --seeds 42 43 44 --rounds 300 --qsgd-levels 127 --llz-window 128
+.venv\Scripts\python.exe -m flower_face.compression_study --seeds 42 43 44 --rounds 300 --qsgd-levels 127 --llz-p-values 0 1 --llz-window 128
 ```
 
 The study writes `study.json` after every attempt and can continue after an
 interruption. Supply the same protocol arguments and its directory:
 
 ```powershell
-.venv\Scripts\python.exe -m flower_face.compression_study --resume outputs\compression-study-<timestamp> --seeds 42 43 44 --rounds 300 --qsgd-levels 127 --llz-window 128
+.venv\Scripts\python.exe -m flower_face.compression_study --resume outputs\compression-study-<timestamp> --seeds 42 43 44 --rounds 300 --qsgd-levels 127 --llz-p-values 0 1 --llz-window 128
 ```
 
 For a different number of rounds:
@@ -743,21 +743,19 @@ and padding. They are synthetic codec checks, not measurements of client updates
 or Flower/network traffic. Incompressible inputs can expand; the codec has no
 hidden fallback. The report also records the extra distortion for positive `p`.
 
-All **142 tests passed**, including 64 new LLZ tests. The manuscript's worked
+At this standalone-codec checkpoint, **142 tests passed**, including 64 new LLZ
+tests. The manuscript's worked
 example reproduced its exact triplets and reconstructed sequence. The standalone
-modules import neither Flower nor PyTorch. The next integration step is to add
-`p=0` LLZ packets to Flower and verify identical model hashes against QSGD alone
-before comparing communication or testing lossy settings in training. LLZ-SI and
-error feedback remain future work; no federated experiment used LLZ in this stage.
+modules import neither Flower nor PyTorch. Later sections document the completed
+Flower integration. LLZ-SI and error feedback remain future work.
 
 ## Flower integration: lossless LLZ after QSGD
 
-`--compression qsgd-llz` now sends QLP1 packets containing QSGD-quantized model
-deltas followed by LLZ-p. Flower currently requires **`llz-p=0`**. Positive
-tolerances remain available in the standalone codec check, but are rejected in
-Flower until the lossless integration has been evaluated. Defaults are still
-uncompressed FedAvg; the new configuration entries are `llz-p=0` and
-`llz-window=128`.
+`--compression qsgd-llz` sends QLP1 packets containing QSGD-quantized model
+deltas followed by LLZ-p. `llz-p=0` is lossless relative to QSGD and is guarded
+by exact model/learning replay. Positive tolerances enable lossy training and
+record QSGD and LLZ error separately. Defaults remain uncompressed FedAvg;
+the compression configuration entries are `llz-p` and `llz-window`.
 
 Both QSGD methods draw the same quantized symbols from the same isolated random
 stream, in sorted tensor-name order. LLZ encoding draws no additional randomness.
