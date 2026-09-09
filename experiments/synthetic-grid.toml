@@ -1,0 +1,15 @@
+[study]
+seeds = [42]
+rounds = 2
+llz-p-values = [0, 1]
+
+[grid]
+qsgd-levels = [31, 127]
+llz-window = [32, 128]
+
+[task]
+task-module = "flower_face.synthetic_task"
+manifest = "data/synthetic/manifest.json"
+num-classes = 3
+num-clients = 4
+augmentation = "none"

@@ -1,4 +1,6 @@
 # Communication-Efficient Federated Learning for Facial Identity Classification
+The reusable framework guide is [FRAMEWORK.md](FRAMEWORK.md), including other
+image datasets, custom models, synthetic validation, TOML studies and reports.
 ## Flower + PyTorch CelebA baseline
 
 A small, local **closed-set identity classifier**: identify which of ten selected

@@ -11,6 +11,7 @@ import torch
 from flower_face.experiment import Experiment
 from flower_face.communication import CommunicationLedger, MeasuredGrid
 from flower_face.task import Net, load_data, read_manifest, seed_everything, test
+from flower_face.task_api import resolve
 from federated_compression import CODECS, compression_settings, decode_update, llz_settings
 from flower_face.reproducibility import model_hash
 
@@ -222,9 +223,10 @@ def main(grid: Grid, context: Context):
     p, window = llz_settings(config, levels=levels) if method == "qsgd-llz" else (0, 128)
     if method == "qsgd-llz":
         config.update({"llz-p": p, "llz-window": window})
-    manifest = read_manifest(config["manifest"], config["num-classes"], config["num-clients"])
+    task = resolve(config, Net=Net, load_data=load_data, read_manifest=read_manifest, test=test)
+    manifest = task.read_manifest(config["manifest"], config["num-classes"], config["num-clients"])
     seed_everything(config["seed"])
-    model = Net(config["num-classes"])
+    model = task.Net(config["num-classes"])
     experiment = Experiment(config["output-dir"], "fedavg-"+method if method != "none" else "fedavg", config, manifest, "round")
     experiment.metadata["initial_model_sha256"] = model_hash(model.state_dict())
     experiment.metadata["compression"] = dict(
@@ -261,7 +263,7 @@ def main(grid: Grid, context: Context):
         # Selection is finished. Evaluate only the validation-selected model once.
         checkpoint = torch.load(experiment.output / "best_model.pt", map_location="cpu", weights_only=True)
         model.load_state_dict(checkpoint["state_dict"])
-        loss, accuracy = test(model, load_data(config, split="test"))
+        loss, accuracy = task.test(model, task.load_data(config, split="test"))
         test_metrics = dict(loss=loss, accuracy=accuracy, checkpoint="best_model.pt",
                             round=experiment.best["step"])
         print(f"Selected model held-out test: loss={loss:.4f}, accuracy={accuracy:.2%}")

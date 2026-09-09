@@ -4,6 +4,7 @@ from flwr.app import ArrayRecord, ConfigRecord, Context, Message, MetricRecord, 
 from flwr.clientapp import ClientApp
 
 from flower_face.task import Net, load_data, seed_everything, test, train as train_model
+from flower_face.task_api import resolve
 from federated_compression import (compression_settings, encode_update_with_stats,
                                    llz_settings, update_metadata)
 
@@ -17,7 +18,8 @@ def setup(msg, context):
         raise ValueError("Launch with exactly the configured number of clients (default 4).")
     seed = config["seed"] + 1000 * int(msg.content["config"]["server-round"]) + client_id
     seed_everything(seed)
-    model = Net(config["num-classes"])
+    task = resolve(config, Net=Net, load_data=load_data, train=train_model, test=test)
+    model = task.Net(config["num-classes"])
     model.load_state_dict(msg.content["arrays"].to_torch_state_dict())
     return model, config, client_id, seed
 
@@ -27,8 +29,9 @@ def train(msg: Message, context: Context):
     model, config, client_id, seed = setup(msg, context)
     method, levels = compression_settings(config)
     reference = {name: value.detach().cpu().clone() for name, value in model.state_dict().items()} if method != "none" else None
-    loader = load_data(config, client_id, "train", seed)
-    loss = train_model(model, loader, config["local-epochs"], msg.content["config"]["lr"],
+    task = resolve(config, Net=Net, load_data=load_data, train=train_model, test=test)
+    loader = task.load_data(config, client_id, "train", seed)
+    loss = task.train(model, loader, config["local-epochs"], msg.content["config"]["lr"],
                        weight_decay=config.get("weight-decay", 0.0))
     content = RecordDict({"metrics": MetricRecord({"train_loss": loss, "num-examples": len(loader.dataset)})})
     if method != "none":
@@ -50,8 +53,9 @@ def train(msg: Message, context: Context):
 @app.evaluate()
 def evaluate(msg: Message, context: Context):
     model, config, client_id, _ = setup(msg, context)
-    loader = load_data(config, client_id, "validation")
-    loss, accuracy = test(model, loader)
+    task = resolve(config, Net=Net, load_data=load_data, train=train_model, test=test)
+    loader = task.load_data(config, client_id, "validation")
+    loss, accuracy = task.test(model, loader)
     content = RecordDict({"metrics": MetricRecord({
         "eval_loss": loss, "eval_acc": accuracy, "num-examples": len(loader.dataset),
     })})

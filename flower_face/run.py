@@ -13,6 +13,7 @@ import tomli_w
 
 from flower_face.task import read_manifest, validate_augmentation, validate_weight_decay
 from federated_compression import compression_settings
+from flower_face.task_api import resolve, validate as validate_task
 
 
 def default_config(root):
@@ -26,6 +27,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rounds", type=int)
     parser.add_argument("--manifest", type=Path)
+    parser.add_argument('--task-module', help='Task implementation module under flower_face')
+    parser.add_argument('--num-classes', type=int)
+    parser.add_argument('--num-clients', type=int)
     parser.add_argument("--seed", type=int, help="Training/codec seed; keeps the manifest and data split fixed")
     parser.add_argument("--lr", type=float, help="SGD learning rate; default: project configuration")
     parser.add_argument("--weight-decay", type=float, help="SGD L2 weight decay; default: 0")
@@ -43,8 +47,11 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     config = default_config(root)
+    for key in ('task_module', 'num_classes', 'num_clients'):
+        if getattr(args, key) is not None:
+            config[key.replace('_', '-')] = getattr(args, key)
     manifest = (args.manifest or root / config["manifest"]).resolve()
-    read_manifest(manifest, config["num-classes"], config["num-clients"])
+    resolve(config).read_manifest(manifest, config["num-classes"], config["num-clients"])
     if args.rounds is not None:
         if args.rounds < 1:
             parser.error("--rounds must be positive")
@@ -92,6 +99,7 @@ def main():
 
 def launch(config, *, root, app_dir=None, log_path=None):
     """Run one experiment, optionally from a small study source snapshot."""
+    validate_task(config)
     runtime = root / ".flwr"
     runtime.mkdir(exist_ok=True)
     overrides = runtime / f"run-config-{uuid4().hex}.toml"

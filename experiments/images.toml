@@ -1,0 +1,15 @@
+# Change manifest and number of classes to match your prepared class folders.
+[study]
+seeds = [42, 43, 44]
+rounds = 30
+qsgd-levels = 127
+llz-p-values = [0, 1]
+llz-window = 128
+
+[task]
+task-module = "flower_face.task"
+manifest = "data/custom/manifest.json"
+num-classes = 10
+num-clients = 4
+augmentation = "none"
+image-size = 64

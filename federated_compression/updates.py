@@ -12,9 +12,10 @@ import numpy as np
 import torch
 
 from compression import qsgd, qsgd_llz
+from compression.registry import REGISTRY, get_codec
 
 CODEC = "qsgd-l2-dense-v1"
-CODECS = {"qsgd": CODEC, "qsgd-llz": "qsgd-llz-p-v1"}
+CODECS = {name: codec.wire_id for name, codec in REGISTRY.items()}
 __all__ = ["CODEC", "CODECS", "compression_settings", "llz_settings",
            "update_metadata", "encode_update", "encode_update_with_stats",
            "decode_update"]
@@ -101,11 +102,10 @@ def encode_update_with_stats(trained, reference, *, levels, seed, server_round,
             stats["qsgd_max_abs_error"],
             float(np.max(np.abs(quantization_error), initial=0.0)))
         stats["qsgd_coordinate_count"] += int(quantized.codes.size)
-        if method == "qsgd-llz":
-            packet = qsgd_llz.pack(quantized, p=llz_p, window_size=llz_window)
-            restored = qsgd_llz.unpack(packet, max_symbols=base.numel(),
-                                       expected_p=llz_p,
-                                       expected_window_size=llz_window)
+        codec = get_codec(method)
+        packet = codec.pack(quantized, llz_p, llz_window)
+        if codec.secondary:
+            restored = codec.unpack(packet, base.numel(), llz_p, llz_window)
             code_error = (restored.codes.astype(np.int64) -
                           quantized.codes.astype(np.int64))
             llz_values = qsgd.dequantize(restored).astype(np.float64)
@@ -120,8 +120,6 @@ def encode_update_with_stats(trained, reference, *, levels, seed, server_round,
                 stats["llz_max_code_error"],
                 int(np.max(np.abs(code_error), initial=0)))
             stats["llz_symbol_count"] += int(quantized.codes.size)
-        else:
-            packet = qsgd.pack(quantized)
         packets[name] = packet
     return ConfigRecord(packets), stats
 
@@ -151,9 +149,7 @@ def decode_update(content, reference, *, levels, server_round, method="qsgd",
         raise ValueError("QSGD tensor names differ from reference")
     decoded = {}
     for name, base in reference.items():
-        q = (qsgd_llz.unpack(packets[name], max_symbols=base.numel(), expected_p=llz_p,
-                             expected_window_size=llz_window)
-             if method == "qsgd-llz" else qsgd.unpack(packets[name]))
+        q = get_codec(method).unpack(packets[name], base.numel(), llz_p, llz_window)
         if q.levels != levels or q.codes.shape != tuple(base.shape) or q.dtype != str(base.numpy().dtype):
             raise ValueError(f"QSGD packet levels/shape/dtype mismatch: {name}")
         decoded[name] = torch.from_numpy(qsgd.dequantize(q))

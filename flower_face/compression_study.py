@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
 import statistics
+import tomllib
+import json
+import sys
 
 from federated_compression import compression_settings
 from flower_face.check_llz import compare as compare_lossless_pair
@@ -183,6 +186,13 @@ def _verify_completed_runs(record, protocol):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config', type=Path, help='TOML with [study] and [task] tables')
+    preliminary, _ = parser.parse_known_args()
+    specification = tomllib.loads(preliminary.config.read_text()) if preliminary.config else {}
+    if set(specification) - {'study', 'task'}:
+        parser.error('Only [study] and [task] tables are supported')
+    if set(specification.get('study', {})) - {'seeds','rounds','qsgd-levels','llz-p-values','llz-window'}:
+        parser.error('Unknown study setting')
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44])
     parser.add_argument("--rounds", type=int, default=300)
     parser.add_argument("--qsgd-levels", type=int, default=127)
@@ -192,6 +202,7 @@ def main():
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--resume", type=Path,
                         help="Resume an interrupted study directory using its frozen app")
+    parser.set_defaults(**{key.replace('-', '_'): value for key, value in specification.get('study', {}).items()})
     args = parser.parse_args()
     if (not args.seeds or len(set(args.seeds)) != len(args.seeds)
             or any(seed < 0 or seed >= 2**32 for seed in args.seeds)):
@@ -209,6 +220,14 @@ def main():
         import json
         record = json.loads((output / "study.json").read_text(encoding="utf-8"))
         protocol = record["protocol"]
+        for key in ('seeds','rounds','qsgd_levels','llz_p_values','llz_window'):
+            flag = '--'+key.replace('_','-')
+            if not any(arg == flag or arg.startswith(flag+'=') for arg in sys.argv[1:]):
+                setattr(args, key, protocol[key])
+        if protocol.get('runner_sha256', file_hash(__file__)) != file_hash(__file__):
+            raise RuntimeError('Study runner changed; resume with the original runner version')
+        if args.config:
+            parser.error('Resume uses the saved protocol; omit --config')
         if (args.seeds != protocol["seeds"] or args.rounds != protocol["rounds"]
                 or args.qsgd_levels != protocol["qsgd_levels"]
                 or args.llz_p_values != protocol["llz_p_values"]
@@ -222,12 +241,15 @@ def main():
         stage = output / "app"
         snapshot(root, stage)
         config = default_config(root)
+        config.update(specification.get('task', {}))
+        config['manifest'] = (root / config['manifest']).resolve().as_posix()
         config.update({"num-server-rounds": args.rounds, "qsgd-levels": args.qsgd_levels,
                        "llz-p": 0, "llz-window": args.llz_window,
                        "evaluate-final-test": False})
         for p in args.llz_p_values:
             compression_settings(dict(config, compression="qsgd-llz", **{"llz-p": p}))
         protocol = dict(
+            schema_version=2, runner_sha256=file_hash(__file__),
             seeds=args.seeds, rounds=args.rounds,
             methods=list(method_labels(args.llz_p_values)),
             qsgd_levels=args.qsgd_levels, llz_p_values=args.llz_p_values,
@@ -247,6 +269,10 @@ def main():
     if file_hash(protocol["base_config"]["manifest"]) != protocol["manifest_sha256"]:
         raise RuntimeError("Dataset manifest changed")
     record["runs"] = _verify_completed_runs(record, protocol)
+    for seed in protocol['seeds']:
+        pair = {run_label(r):r for r in record['runs'] if r['config']['seed'] == seed}
+        if 'qsgd-llz-p0' in pair:
+            compare_lossless_pair(pair['qsgd'], pair['qsgd-llz-p0'])
     record.update(status="running")
     record.pop("error", None)
     write_json(output / "study.json", record)
@@ -274,14 +300,16 @@ def main():
                 write_json(output / "study.json", record)
                 print(f"Starting seed={seed}, method={label}, rounds={protocol['rounds']}", flush=True)
                 try:
+                    if source_hash(stage) != protocol['source_sha256'] or file_hash(config['manifest']) != protocol['manifest_sha256']:
+                        raise RuntimeError('Frozen source or manifest changed before launch')
                     if launch(config, root=root, app_dir=stage,
                               log_path=run_root / "terminal.log") != 0:
                         raise RuntimeError(f"Flower failed: inspect {run_root / 'terminal.log'}")
                     result = collect(run_root, config)
                     if result["metadata"]["source_sha256"] != protocol["source_sha256"]:
                         raise RuntimeError("Run source differs from frozen application")
-                    record["runs"].append(result)
-                    attempt["status"] = "completed"
+                    if result['metadata']['manifest_sha256'] != protocol['manifest_sha256']:
+                        raise RuntimeError('Run manifest differs from frozen study')
                     if method == "qsgd-llz" and p == 0:
                         qsgd = next(r for r in record["runs"] if
                                      r["config"]["seed"] == seed and
@@ -292,6 +320,8 @@ def main():
                             upload_reduction_percent=exact["upload_reduction_percent"],
                             total_reduction_percent=exact["total_reduction_percent"])
                         print(f"Exact QSGD/LLZ p=0 replay passed: seed={seed}", flush=True)
+                    record['runs'].append(result)
+                    attempt['status'] = 'completed'
                 except BaseException as error:
                     attempt.update(status="failed", error=str(error))
                     raise

@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
+reports = ["matplotlib>=3.8,<4"]
 
 [tool.setuptools.packages.find]
 include = ["flower_face*", "compression*", "federated_compression*"]
@@ -28,6 +29,7 @@ serverapp = "flower_face.server_app:app"
 clientapp = "flower_face.client_app:app"
 
 [tool.flwr.app.config]
+task-module = "flower_face.task"
 num-server-rounds = 3
 evaluate-final-test = false
 compression = "none"

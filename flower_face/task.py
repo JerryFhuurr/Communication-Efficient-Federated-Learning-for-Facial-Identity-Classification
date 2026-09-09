@@ -2,6 +2,7 @@
 
 import json
 import math
+import hashlib
 from pathlib import Path
 import random
 
@@ -84,6 +85,8 @@ class CelebASubset(Dataset):
 
     def __getitem__(self, index):
         row = self.rows[index]
+        if 'sha256' in row and hashlib.sha256((self.root / row['filename']).read_bytes()).hexdigest() != row['sha256']:
+            raise ValueError(f"Image changed since manifest preparation: {row['filename']}")
         with Image.open(self.root / row["filename"]) as image:
             tensor = self.transform(image.convert("RGB"))
         return tensor, row["label"]
