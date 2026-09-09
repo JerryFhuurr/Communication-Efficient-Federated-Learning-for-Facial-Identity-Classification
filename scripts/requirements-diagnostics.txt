@@ -1,0 +1,2 @@
+# Install alongside the existing project environment to render the static plots.
+matplotlib==3.11.1

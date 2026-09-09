@@ -38,14 +38,15 @@ def test_actual_handlers_and_strategy_weight_deltas_and_refresh_round_reference(
     config = {'manifest': str(path), 'num-classes': 2, 'num-clients': 4, 'seed': 42,
               'output-dir': str(tmp_path/'outputs'), 'num-server-rounds': 2,
               'learning-rate': 0.01, 'local-epochs': 1, 'evaluate-final-test': False,
-              'compression': method, 'qsgd-levels': 127, 'llz-p': 0, 'llz-window': 128}
+              'compression': method, 'qsgd-levels': 127, 'llz-p': 0, 'llz-window': 128, 'weight-decay': .001}
     monkeypatch.setattr(client_app, 'Net', TinyNet)
     monkeypatch.setattr(server_app, 'Net', TinyNet)
     monkeypatch.setattr(client_app, 'load_data', lambda config, client_id, split, *args:
                         SimpleNamespace(client_id=client_id, dataset=range(client_id+1)))
     changes = [-1.0, 2.0, 3.0, -4.0]
 
-    def local_train(model, loader, epochs, lr):
+    def local_train(model, loader, epochs, lr, *, weight_decay=0.0):
+        assert weight_decay == .001
         with torch.no_grad():
             model.weight.add_(changes[loader.client_id])
         return float(loader.client_id + 1)

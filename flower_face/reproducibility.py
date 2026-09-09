@@ -22,7 +22,7 @@ def model_hash(state):
 def source_hash(root=None):
     root = Path(root) if root else Path(__file__).resolve().parents[1]
     files = [root/'pyproject.toml']
-    for package in ('flower_face', 'compression'):
+    for package in ('flower_face', 'compression', 'federated_compression'):
         files.extend((root/package).rglob('*.py'))
     entries = {}
     for path in sorted(files):

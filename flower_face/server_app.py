@@ -10,7 +10,7 @@ import torch
 from flower_face.experiment import Experiment
 from flower_face.communication import CommunicationLedger, MeasuredGrid
 from flower_face.task import Net, load_data, read_manifest, seed_everything, test
-from flower_face.updates import CODECS, compression_settings, decode_update, llz_settings
+from federated_compression import CODECS, compression_settings, decode_update, llz_settings
 from flower_face.reproducibility import model_hash
 
 app = ServerApp()

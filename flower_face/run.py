@@ -1,6 +1,7 @@
 """Launch the current Flower CLI with local paths and four simulated clients."""
 
 import argparse
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -10,8 +11,8 @@ from uuid import uuid4
 
 import tomli_w
 
-from flower_face.task import read_manifest
-from flower_face.updates import compression_settings
+from flower_face.task import read_manifest, validate_augmentation, validate_weight_decay
+from federated_compression import compression_settings
 
 
 def default_config(root):
@@ -26,6 +27,10 @@ def main():
     parser.add_argument("--rounds", type=int)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--seed", type=int, help="Training/codec seed; keeps the manifest and data split fixed")
+    parser.add_argument("--lr", type=float, help="SGD learning rate; default: project configuration")
+    parser.add_argument("--weight-decay", type=float, help="SGD L2 weight decay; default: 0")
+    parser.add_argument("--augmentation", choices=["none", "horizontal-flip"],
+                        help="Training-only image augmentation; default: none")
     parser.add_argument("--output-dir", type=Path, help="Directory for this run's experiment output")
     parser.add_argument("--compression", choices=["none", "qsgd", "qsgd-llz"], help="Client upload compression; default: none")
     parser.add_argument("--qsgd-levels", type=int, help="QSGD positive intervals s; default: 127")
@@ -50,6 +55,14 @@ def main():
         config["seed"] = args.seed
     if args.output_dir is not None:
         config["output-dir"] = args.output_dir.resolve().as_posix()
+    if args.lr is not None:
+        if not math.isfinite(args.lr) or args.lr <= 0:
+            parser.error("--lr must be finite and positive")
+        config["learning-rate"] = args.lr
+    if args.weight_decay is not None:
+        config["weight-decay"] = args.weight_decay
+    if args.augmentation is not None:
+        config["augmentation"] = args.augmentation
     if args.compression is not None:
         config["compression"] = args.compression
     if args.qsgd_levels is not None:
@@ -68,6 +81,8 @@ def main():
             parser.error("--llz-window must be in [1, 65535]")
         config["llz-window"] = args.llz_window
     try:
+        validate_weight_decay(config.get("weight-decay", 0.0))
+        validate_augmentation(config.get("augmentation", "none"))
         compression_settings(config)
     except ValueError as error:
         parser.error(str(error))

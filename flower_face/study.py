@@ -25,7 +25,7 @@ def snapshot(root, destination):
     """Copy code only, avoiding repeated scans of 202,599 dataset images."""
     destination.mkdir(parents=True, exist_ok=False)
     shutil.copy2(root/'pyproject.toml', destination/'pyproject.toml')
-    for package in ('flower_face', 'compression'):
+    for package in ('flower_face', 'compression', 'federated_compression'):
         for path in (root/package).rglob('*.py'):
             target = destination/path.relative_to(root)
             target.parent.mkdir(parents=True, exist_ok=True)

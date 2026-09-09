@@ -18,7 +18,7 @@ dependencies = [
 dev = ["pytest>=8,<10"]
 
 [tool.setuptools.packages.find]
-include = ["flower_face*", "compression*"]
+include = ["flower_face*", "compression*", "federated_compression*"]
 
 [tool.flwr.app]
 publisher = "local"
@@ -38,7 +38,9 @@ num-clients = 4
 num-classes = 10
 local-epochs = 1
 batch-size = 16
-learning-rate = 0.01
+learning-rate = 0.1
+weight-decay = 0.0
+augmentation = "horizontal-flip"
 seed = 42
 image-size = 64
 manifest = "data/subset/manifest.json"

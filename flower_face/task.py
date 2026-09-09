@@ -1,6 +1,7 @@
 """PyTorch model, local CelebA dataset, and train/evaluation loops (no Flower)."""
 
 import json
+import math
 from pathlib import Path
 import random
 
@@ -9,7 +10,7 @@ from PIL import Image
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
-from torchvision.transforms import Compose, Normalize, Resize, ToTensor
+from torchvision.transforms import Compose, Normalize, RandomHorizontalFlip, Resize, ToTensor
 
 
 def seed_everything(seed):
@@ -58,15 +59,25 @@ def read_manifest(path, num_classes=10, num_clients=4):
     return data
 
 
+def validate_augmentation(value):
+    if value not in {"none", "horizontal-flip"}:
+        raise ValueError("augmentation must be 'none' or 'horizontal-flip'.")
+    return value
+
+
 class CelebASubset(Dataset):
-    def __init__(self, manifest, split, client_id=None, image_size=64):
+    def __init__(self, manifest, split, client_id=None, image_size=64, augmentation="none"):
         self.root = Path(manifest["image_root"])
         self.rows = [r for r in manifest["examples"] if r["split"] == split
                      and (client_id is None or r["client_id"] == client_id)]
         if not self.rows:
             raise ValueError(f"Empty {split} split for client {client_id}.")
-        self.transform = Compose([Resize((image_size, image_size)), ToTensor(),
-                                  Normalize((0.5,) * 3, (0.5,) * 3)])
+        augmentation = validate_augmentation(augmentation)
+        transforms = [Resize((image_size, image_size))]
+        if split == "train" and augmentation == "horizontal-flip":
+            transforms.append(RandomHorizontalFlip(p=0.5))
+        transforms.extend([ToTensor(), Normalize((0.5,) * 3, (0.5,) * 3)])
+        self.transform = Compose(transforms)
 
     def __len__(self):
         return len(self.rows)
@@ -78,19 +89,29 @@ class CelebASubset(Dataset):
         return tensor, row["label"]
 
 
-def load_data(config, client_id=None, split="train", seed=None):
+def load_data(config, client_id=None, split="train", seed=None, *, apply_augmentation=True):
     manifest = read_manifest(config["manifest"], config["num-classes"], config["num-clients"])
-    dataset = CelebASubset(manifest, split, client_id, config["image-size"])
+    augmentation = validate_augmentation(config.get("augmentation", "none"))
+    dataset = CelebASubset(manifest, split, client_id, config["image-size"],
+                           augmentation if apply_augmentation else "none")
     generator = torch.Generator().manual_seed(config["seed"] if seed is None else seed)
     return DataLoader(dataset, batch_size=config["batch-size"], shuffle=split == "train",
                       num_workers=0, generator=generator)
 
 
-def train(model, loader, epochs, lr, device="cpu"):
+def validate_weight_decay(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise ValueError("weight-decay must be a finite nonnegative number.")
+    return float(value)
+
+
+def train(model, loader, epochs, lr, device="cpu", *, weight_decay=0.0):
     if epochs < 1 or lr <= 0:
         raise ValueError("local-epochs and learning-rate must be positive.")
     model.to(device).train()
-    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+    # PyTorch SGD applies coupled L2 decay to every parameter, including biases.
+    # Reported loss remains cross-entropy; no penalty is added to evaluation loss.
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr, weight_decay=validate_weight_decay(weight_decay))
     criterion = nn.CrossEntropyLoss()
     total_loss, count = 0.0, 0
     for _ in range(epochs):

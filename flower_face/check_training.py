@@ -7,7 +7,8 @@ import tomllib
 import torch
 from torch.utils.data import DataLoader, Subset
 
-from flower_face.task import Net, load_data, read_manifest, seed_everything, test, train
+from flower_face.task import (Net, load_data, read_manifest, seed_everything, test, train,
+                              validate_augmentation, validate_weight_decay)
 from flower_face.experiment import Experiment
 
 
@@ -17,12 +18,22 @@ def main():
     parser.add_argument("--steps", type=int, default=500, help="Maximum tiny-batch updates")
     parser.add_argument("--epochs", type=int, default=30, help="Centralized training epochs")
     parser.add_argument("--lr", type=float, help="Default: 0.1 for overfit; project LR for centralized")
+    parser.add_argument("--weight-decay", type=float, help="SGD L2 weight decay; default: project configuration")
+    parser.add_argument("--augmentation", choices=["none", "horizontal-flip"],
+                        help="Training-only augmentation; default: project configuration")
     args = parser.parse_args()
     if args.steps < 1 or args.epochs < 1 or (args.lr is not None and args.lr <= 0):
         parser.error("Steps, epochs, and learning rate must be positive")
     root = Path(__file__).resolve().parents[1]
     config = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["flwr"]["app"]["config"]
     config["manifest"] = str((root / config["manifest"]).resolve())
+    try:
+        config["weight-decay"] = validate_weight_decay(args.weight_decay if args.weight_decay is not None
+                                                       else config.get("weight-decay", 0.0))
+        config["augmentation"] = validate_augmentation(args.augmentation if args.augmentation is not None
+                                                       else config.get("augmentation", "none"))
+    except ValueError as error:
+        parser.error(str(error))
     manifest = read_manifest(config["manifest"], config["num-classes"], config["num-clients"])
     seed_everything(config["seed"])
     model = Net(config["num-classes"])
@@ -46,7 +57,7 @@ def main():
         iterations = args.steps
         selected = [loader.dataset.dataset.rows[i] for i in indices]
     else:
-        evaluation_loader = DataLoader(loader.dataset, batch_size=config["batch-size"], shuffle=False)
+        evaluation_loader = load_data(config, split="train", apply_augmentation=False)
         validation_loader = load_data(config, split="validation")
         iterations = args.epochs
         selected = loader.dataset.rows
@@ -57,7 +68,7 @@ def main():
     for iteration in range(1, iterations + 1):
         # task.train uses stateless SGD (no momentum), so one-epoch calls preserve
         # the same optimizer behavior as a single multi-epoch call.
-        optimization_loss = train(model, loader, epochs=1, lr=lr)
+        optimization_loss = train(model, loader, epochs=1, lr=lr, weight_decay=config["weight-decay"])
         train_loss, train_acc = test(model, evaluation_loader)
         row = dict(iteration=iteration, optimization_loss=optimization_loss,
                    train_loss=train_loss, train_accuracy=train_acc)

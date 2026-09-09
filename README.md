@@ -18,7 +18,10 @@ Flower is pinned to 1.36.0; this project runs locally with four simulated client
 | `flower_face/server_app.py` | Run ordinary FedAvg with validation checkpoint selection and optional test evaluation |
 | `flower_face/communication.py` | Measure serialized Flower object sizes and log training/validation upload and download totals |
 | `compression/qsgd.py` | Standalone L2 QSGD quantizer and dense byte codec; no Flower or PyTorch imports |
-| `flower_face/updates.py` | Adapt model deltas to named QSGD byte packets and validate incoming updates |
+| `compression/llz_p.py` | Standalone LLZ-p symbol codec following the supplied paper |
+| `compression/qsgd_llz.py` | Compose QSGD quantization with LLZ-p packet encoding |
+| `federated_compression/updates.py` | Reusable PyTorch/Flower adapter for named compressed model deltas; no dataset or model imports |
+| `flower_face/updates.py` | Backward-compatible import shim for earlier project code |
 | `flower_face/reproducibility.py` | Stable model/source hashes and recorded deterministic settings |
 | `flower_face/study.py` | Replay checks, paired seed experiments, and aggregate study summaries |
 | `compression/check_qsgd.py` | Synthetic codec size/error check with a saved JSON report |
@@ -45,7 +48,7 @@ python -m venv .venv
 ```
 
 CPU execution is intentional. Images become RGB 64×64 tensors, normalized to
-[-1, 1]. Each worker uses one PyTorch thread. No augmentation is enabled.
+[-1, 1]. Each worker uses one PyTorch thread. Training uses horizontal flips.
 Compression is optional and disabled by default. Ray support on Windows is experimental; Flower recommends WSL2 if
 native Windows simulation fails. See [Flower simulation documentation](https://flower.ai/docs/framework/how-to-run-simulations.html).
 
@@ -82,6 +85,35 @@ The launcher uses the installed project environment and disables redundant runti
 dependency installation. It also enables UTF-8 output for Windows terminals and
 limits Ray's CPU pool to four cores.
 
+## Framework boundary
+
+The CelebA code is a replaceable task used to exercise the federated and
+compression pipeline. The project is split into three layers:
+
+1. `compression/` implements byte codecs over NumPy arrays and integer symbols.
+   It does not import Flower, PyTorch, or the face dataset.
+2. `federated_compression/` converts named PyTorch model deltas to and from
+   Flower `ConfigRecord` packets. It has no dependency on `flower_face`.
+3. `flower_face/` supplies the demonstration model, loaders, client handlers,
+   FedAvg strategy, checkpoints, and experiment records.
+
+To reuse the framework for another dataset, replace the model and data functions
+in `flower_face/task.py` (or create another task package) while preserving named
+floating state dictionaries and the client/server adapter calls. QSGD and LLZ do
+not need to change.
+
+Available upload modes are `none`, `qsgd`, and `qsgd-llz`. QSGD is applied to
+each client's model delta relative to that round's global model. With
+`qsgd-llz`, the same quantized integer codes are encoded by LLZ-p. The integrated
+path currently fixes `p=0`, so QSGD and QSGD+LLZ must produce identical decoded
+updates, model hashes, and learning metrics; only their packet sizes may differ.
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.run --rounds 3 --compression qsgd --skip-test
+.venv\Scripts\python.exe -m flower_face.run --rounds 3 --compression qsgd-llz --qsgd-levels 127 --llz-window 128 --skip-test
+.venv\Scripts\python.exe -m flower_face.check_llz --rounds 3 --seed 42 --qsgd-levels 127 --llz-window 128
+```
+
 For a different number of rounds:
 
 ```powershell
@@ -106,7 +138,7 @@ Before longer federated experiments, run these checks from the project folder:
 The overfit check aims for 100% training accuracy and loss below 0.05; it stops
 early on reaching both. If it has not reached the target, inspect its curve before
 proceeding. Its learning rate is intentionally higher than the baseline's.
-Centralized training uses the project learning rate (0.01) unless overridden with
+Centralized training uses the project learning rate (0.1) unless overridden with
 `--lr`. These are starting settings, not a guarantee of convergence.
 
 Both checks reuse `task.py` and print training accuracy; centralized training also
@@ -121,7 +153,8 @@ every training image thirty times, but have different optimizer update sequences
 they are a diagnostic comparison rather than identical optimization workloads.
 
 Defaults: seed 42, ten identities, thirty images per identity, three FedAvg
-rounds, one local epoch per round, batch size 16, SGD learning rate 0.01.
+rounds, one local epoch per round, batch size 16, SGD learning rate 0.1,
+zero weight decay, and training-only horizontal flips.
 All four clients participate in training and validation every round.
 
 | Split | Images per identity | Total | Per client |
@@ -240,7 +273,7 @@ For ordinary development:
 
 ```powershell
 .venv\Scripts\python.exe -m flower_face.run --rounds 300
-.venv\Scripts\python.exe -m flower_face.check_training centralized --epochs 100 --lr 0.01
+.venv\Scripts\python.exe -m flower_face.check_training centralized --epochs 100 --lr 0.1
 ```
 
 Only after the experiment settings and selection protocol have been chosen:
@@ -837,4 +870,193 @@ audit while the working source still matches these experiments:
 
 ```powershell
 .venv\Scripts\python.exe outputs/llz-three-seeds-20260908T132726021518Z/aggregate.py
+```
+
+## Training diagnosis: centralized references, seeds 42–44
+
+On 2026-09-09, three new 300-epoch centralized runs were compared with the saved
+300-round uncompressed FedAvg and QSGD runs. The CNN, preprocessing, learning
+rate (0.01), batch size (16), and fixed split remained unchanged. Initial model
+hashes match within each seed. The held-out test set was unused.
+
+| Seed | Selected FedAvg accuracy | Selected QSGD accuracy | Selected centralized accuracy | Centralized selected epoch |
+| --- | ---: | ---: | ---: | ---: |
+| 42 | 40.0% | 45.0% | 47.5% | 77 |
+| 43 | 17.5% | 17.5% | 40.0% | 117 |
+| 44 | 40.0% | 40.0% | 32.5% | 60 |
+| Mean +/- sample SD | 32.50% +/- 12.99 pp | 34.17% +/- 14.65 pp | 40.00% +/- 7.50 pp | |
+
+All selections use minimum validation loss, not maximum accuracy. LLZ-p=0
+shares QSGD's exact learning curves. The six saved federated runs were audited,
+and the earlier QSGD curves exactly match the later LLZ study. The new central
+runs passed initialization/environment and checkpoint hash/selection checks.
+Saved models were also evaluated on the entire training and validation sets.
+
+All three centralized models reached **100% training accuracy**, but their final
+validation accuracies were 45.0%, 42.5%, and 45.0%; final validation losses rose
+to 6.2391, 5.0620, and 6.7330. This shows overfitting on the small training subset.
+Seed 43's final federated training accuracy was only 29.0% for both uncompressed
+FedAvg and QSGD, indicating slow fitting in that setting. Compression alone does
+not explain its weakness. Centralized selected accuracy did not improve for
+every seed, and these results do not establish statistical superiority.
+
+Each method processes **60,000 training examples per seed**. Centralized training
+uses 3,900 sequential SGD steps; federated training uses 4,800 local steps summed
+across four clients and 300 aggregations. Shuffling, incomplete batches, and
+averaging differ. This is an equal-data-exposure diagnostic, not an identical
+optimization or wall-time comparison. Historical federated optimization loss
+describes changing local models; it is not global training-set loss.
+
+The next proposed experiment is a controlled learning-rate comparison using
+uncompressed FedAvg, with the same model, split, seeds and budget. Diagnose
+training speed before increasing model size, and investigate regularization or
+augmentation if fitting improves while the validation gap persists. No tuning
+or model changes were made in this stage.
+
+The complete diagnosis, raw curves, PNG/SVG figures, and new checkpoints are in
+`outputs/training-diagnosis-20260909T091351893615Z/`. Start with `report.md` and
+`learning-curves.png`; `centralized-generalization.png` shows the train/validation
+gap. Reusable runner/plotting commands are documented in `scripts/README.md`.
+Plot dependencies are separate from the training configuration. The original
+training-package source fingerprint remains unchanged.
+
+## Controlled learning-rate comparison
+
+On 2026-09-09, uncompressed FedAvg was compared at learning rates **0.01, 0.03,
+and 0.1** across seeds 42, 43 and 44, with a fixed 300-round budget. The three
+audited 0.01 runs were reused and six new runs completed. Each new run uses the
+original study's saved application snapshot, matching its baseline's source,
+data, initialization and environment; only learning rate and output path differ.
+
+The rule declared before training selects the rate with the lowest mean
+validation-selected loss across seeds, with smaller rate breaking exact ties.
+Accuracy is reported at those same minimum-loss checkpoints.
+
+| Learning rate | Selected validation loss, mean +/- sample SD | Selected accuracy, mean +/- sample SD | Mean final training accuracy |
+| --- | ---: | ---: | ---: |
+| 0.01 | 1.9195 +/- 0.2031 | 32.50% +/- 12.99 pp | 60.17% |
+| 0.03 | 1.8097 +/- 0.0857 | 30.00% +/- 4.33 pp | 100.00% |
+| 0.1 | 1.7279 +/- 0.0903 | 37.50% +/- 5.00 pp | 100.00% |
+
+**0.1 is the preferred candidate among these tested rates.** Its selected
+checkpoints occur at rounds 72, 48 and 53, with validation accuracies 42.5%,
+32.5% and 37.5%. It improves selected validation loss for all three seeds
+relative to 0.01; selected accuracy improves for two seeds and drops by 2.5 pp
+for seed 44. Both higher rates overcome the poor training fit of seed 43, but
+their late-round validation losses still rise markedly. Improving fitting does
+not remove overfitting. The next proposed experiment is a small weight-decay
+comparison at rate 0.1, keeping the other controls fixed.
+
+All nine accepted runs passed checkpoint/configuration and communication audits:
+2,700 recorded rounds, 43,200 message records, zero error replies. Twelve new
+sweep tests passed. The test set was unused, and project defaults remain at
+learning rate 0.01. These are exploratory tuning results on one repeatedly used
+40-image validation split, not a significance claim or a new held-out estimate.
+
+Run the sweep or regenerate its plots with:
+
+```powershell
+.venv\Scripts\python.exe scripts/sweep_learning_rate.py
+.venv\Scripts\python.exe scripts/plot_lr_sweep.py outputs/lr-sweep-20260909T093522322142Z
+```
+
+The first command launches new training; the second reads saved results only.
+The completed artifacts are in `outputs/lr-sweep-20260909T093522322142Z/`,
+including `report.md`, `summary.json`, raw `curves.json`, and both PNG/SVG
+figures (`learning-rate-curves` and `learning-rate-summary`). The frozen source,
+logs and checkpoints are retained. See `scripts/README.md` for details.
+
+## Weight-decay comparison at learning rate 0.1
+
+Weight decay is now configurable through `task.train(..., weight_decay=0.0)`,
+Flower's `weight-decay` configuration, and `--weight-decay` on both the Flower
+launcher and centralized checker. `flower_face.run` also accepts `--lr`.
+PyTorch SGD applies coupled L2 decay to all model parameters, including biases;
+reported losses remain cross-entropy without a parameter penalty. Missing
+configuration means zero, and the project defaults remain LR 0.01 / decay 0.0.
+
+On 2026-09-09, a controlled comparison tested decay **0, 0.0001 and 0.001** at
+LR 0.1 across seeds 42, 43 and 44. All nine runs used the same new application
+snapshot and 300 rounds. Before positive decay was tested, the three zero-decay
+runs reproduced **all 900 legacy model hashes, learning metrics and selected
+checkpoints exactly**, verifying compatibility with the earlier rate-0.1 runs.
+
+| Weight decay | Selected validation loss, mean +/- sample SD | Selected accuracy, mean +/- sample SD | Mean final training accuracy |
+| --- | ---: | ---: | ---: |
+| 0 | 1.7279 +/- 0.0903 | 37.50% +/- 5.00 pp | 100.00% |
+| 0.0001 | 1.7522 +/- 0.0579 | 38.33% +/- 6.29 pp | 100.00% |
+| 0.001 | 1.7772 +/- 0.0504 | 37.50% +/- 2.50 pp | 100.00% |
+
+**Zero decay remains preferred under the predefined minimum-mean-validation-loss
+rule.** Positive decay changes individual results and can reduce late validation
+loss, but neither candidate improves aggregate selected loss. All models still
+memorize the training subset. The small accuracy increase at 0.0001 does not
+establish a reliable benefit on this repeatedly used 40-image validation set.
+This result applies to these tested values and configuration, not weight decay
+in general. No test images were loaded.
+
+All nine runs passed audits: 2,700 round records, 43,200 message records and zero
+error replies. The 199-test suite passed after optimizer integration; all 12
+focused weight-decay tests passed after the three new sweep-control tests were
+added. Tests cover zero-decay equivalence, the SGD update equation, validation,
+client forwarding and controlled comparison gates.
+
+The completed artifacts are in `outputs/wd-sweep-20260909T100745974156Z/`:
+`report.md`, `summary.json`, raw curves, replay records, frozen source,
+checkpoints and PNG/SVG figures. The next proposed experiment is training-only
+augmentation at LR 0.1 / decay 0, keeping the other controls fixed.
+
+```powershell
+# New controlled sweep, including three full zero-decay replay runs.
+.venv\Scripts\python.exe scripts/sweep_weight_decay.py
+
+# Plot the completed sweep without retraining.
+.venv\Scripts\python.exe scripts/plot_lr_sweep.py outputs/wd-sweep-20260909T100745974156Z --parameter weight-decay
+
+# Single run with explicit optimizer settings.
+.venv\Scripts\python.exe -m flower_face.run --rounds 300 --seed 42 --compression none --lr 0.1 --weight-decay 0 --skip-test
+```
+
+See `scripts/README.md` for resume support and plotting dependencies. Historical
+diagnostic runners that require byte-identical training source reject this new
+revision against older snapshots; their stored figures can still be regenerated.
+
+## Training-only horizontal-flip comparison
+
+The final preliminary model-setting test compared no augmentation with
+`RandomHorizontalFlip(p=0.5)` across seeds 42, 43 and 44. Runs used uncompressed
+FedAvg for 300 rounds at learning rate 0.1 and weight decay 0. Flipping occurs
+only after resize while loading training images; validation, test, and checkpoint
+evaluation remain unaugmented.
+
+| Training augmentation | Selected validation loss, mean +/- sample SD | Selected accuracy, mean +/- sample SD | Mean final training accuracy |
+| --- | ---: | ---: | ---: |
+| None | 1.7279 +/- 0.0903 | 37.50% +/- 5.00 pp | 100.00% |
+| Horizontal flip | **1.5902 +/- 0.0841** | **53.33% +/- 5.20 pp** | 91.50% |
+
+Horizontal flipping improved selected accuracy for every seed: 42.5% to 57.5%,
+32.5% to 55.0%, and 37.5% to 47.5%. Mean selected loss also improved under the
+predeclared selection rule. Late validation loss fell substantially, while not
+all final models memorized every training image. This supports horizontal
+flipping as useful training regularization for the current subset.
+
+Before augmented runs began, three new no-augmentation runs reproduced all 900
+legacy model hashes, learning metrics and selected checkpoints exactly. All six
+new runs passed artifact audits: 1,800 rounds, 28,800 message records, and zero
+error replies. The test set remained unused. These results still come from one
+repeatedly used 40-image validation split and are not an unbiased final estimate.
+
+The project training defaults are now frozen for the next stage at learning rate
+**0.1**, weight decay **0**, training-only horizontal flipping, four IID clients,
+and one local epoch per round. Earlier QSGD and LLZ experiments used learning
+rate 0.01 without augmentation, so compression comparisons must be rerun under
+this frozen setup before making combined accuracy/communication claims.
+
+Complete outputs are in
+`outputs/augmentation-sweep-20260909T105719444213Z/`, including `report.md`, raw
+curves, checkpoints, frozen source, and PNG/SVG figures. Reusable commands:
+
+```powershell
+.venv\Scripts\python.exe scripts/sweep_augmentation.py
+.venv\Scripts\python.exe scripts/plot_augmentation_sweep.py outputs/augmentation-sweep-20260909T105719444213Z
 ```

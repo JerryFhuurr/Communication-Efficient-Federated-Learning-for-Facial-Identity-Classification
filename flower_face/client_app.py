@@ -4,7 +4,7 @@ from flwr.app import ArrayRecord, ConfigRecord, Context, Message, MetricRecord, 
 from flwr.clientapp import ClientApp
 
 from flower_face.task import Net, load_data, seed_everything, test, train as train_model
-from flower_face.updates import compression_settings, encode_update, llz_settings, update_metadata
+from federated_compression import compression_settings, encode_update, llz_settings, update_metadata
 
 app = ClientApp()
 
@@ -27,7 +27,8 @@ def train(msg: Message, context: Context):
     method, levels = compression_settings(config)
     reference = {name: value.detach().cpu().clone() for name, value in model.state_dict().items()} if method != "none" else None
     loader = load_data(config, client_id, "train", seed)
-    loss = train_model(model, loader, config["local-epochs"], msg.content["config"]["lr"])
+    loss = train_model(model, loader, config["local-epochs"], msg.content["config"]["lr"],
+                       weight_decay=config.get("weight-decay", 0.0))
     content = RecordDict({"metrics": MetricRecord({"train_loss": loss, "num-examples": len(loader.dataset)})})
     if method != "none":
         server_round = int(msg.content["config"]["server-round"])

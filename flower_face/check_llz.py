@@ -8,7 +8,7 @@ from pathlib import Path
 from flower_face.reproducibility import source_hash
 from flower_face.run import default_config, launch
 from flower_face.study import check_pair, collect, snapshot, write_json
-from flower_face.updates import compression_settings
+from federated_compression import compression_settings
 
 
 def compare(baseline, compressed):

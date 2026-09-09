@@ -1,9 +1,10 @@
-# Standalone QSGD codec
+# Standalone QSGD and LLZ-p codecs
 
 This package requires NumPy and Python's standard library. It imports neither
-Flower nor PyTorch. It currently implements `qsgd-l2-dense-v1`. The separate
-`flower_face/updates.py` adapter uses it for optional federated client delta
-uploads. The commands below remain standalone synthetic codec checks.
+Flower nor PyTorch. It implements `qsgd-l2-dense-v1`, `llz-p-fixed-v1`, and the
+composed `qsgd-llz-p-v1` packet. The separate
+`federated_compression/updates.py` adapter uses these codecs for optional client
+model-delta uploads. The commands below remain standalone synthetic codec checks.
 
 ## Quantization and encoding are separate
 
@@ -98,9 +99,12 @@ tensor; a future model/update container must additionally count tensor names,
 ordering, framing, and Flower message metadata. Packet sizes here must not be
 compared directly with the earlier complete Flower object-graph totals.
 
-The exposed integer representation is a starting point for later LLZ work.
-Those algorithms have not been implemented; their ordering, coding, and lossless
-`p=0` requirements must be checked against their source papers.
+`qsgd_llz.pack` passes the already sampled QSGD integer codes to LLZ-p, so it
+does not quantize again or consume additional randomness. At `p=0`, LLZ decoding
+restores every QSGD code exactly. The combined decoder therefore reconstructs
+the same floating update as the dense QSGD packet. LLZ framing, metadata, and
+byte padding are included in `packet_stats`; see `papers/README.md` for the
+paper mapping and source fingerprints.
 
 ## Checks
 
@@ -114,6 +118,8 @@ From the project root in PowerShell:
 ```powershell
 .venv\Scripts\python.exe -m pytest tests/test_qsgd.py -q
 .venv\Scripts\python.exe -m compression.check_qsgd
+.venv\Scripts\python.exe -m pytest tests/test_llz_p.py -q
+.venv\Scripts\python.exe -m compression.check_llz --levels 127 --p 0 1 --window-size 128
 ```
 
 The demo uses a fixed synthetic float32 vector with 4,096 coordinates. It performs
