@@ -10,6 +10,7 @@ from federated_compression.updates import (
     compression_settings,
     decode_update,
     encode_update,
+    encode_update_with_stats,
     llz_settings,
     update_metadata,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "compression_settings",
     "decode_update",
     "encode_update",
+    "encode_update_with_stats",
     "llz_settings",
     "update_metadata",
 ]

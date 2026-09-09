@@ -1,8 +1,9 @@
 """FedAvg with optional QSGD delta uploads and validation-selected checkpoints."""
 
 from copy import copy
+import math
 
-from flwr.app import ArrayRecord, ConfigRecord, Context, RecordDict
+from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord, RecordDict
 from flwr.serverapp import Grid, ServerApp
 from flwr.serverapp.strategy import FedAvg
 import torch
@@ -14,6 +15,92 @@ from federated_compression import CODECS, compression_settings, decode_update, l
 from flower_face.reproducibility import model_hash
 
 app = ServerApp()
+
+LLZ_CLIENT_METRICS = (
+    "llz_code_squared_error",
+    "llz_reconstruction_squared_error",
+    "llz_qsgd_squared_norm",
+    "llz_max_code_error",
+    "llz_symbol_count",
+)
+QSGD_CLIENT_METRICS = (
+    "qsgd_quantization_squared_error",
+    "qsgd_input_squared_norm",
+    "qsgd_max_abs_error",
+    "qsgd_coordinate_count",
+)
+
+
+def aggregate_qsgd_distortion(replies):
+    """Aggregate QSGD error against the original full-precision client deltas."""
+    totals = {key: 0.0 for key in QSGD_CLIENT_METRICS}
+    maximum = 0.0
+    for reply in replies:
+        metrics = reply.content["metrics"]
+        if any(key not in metrics for key in QSGD_CLIENT_METRICS):
+            raise ValueError("Compressed reply is missing QSGD distortion measurements")
+        for key in QSGD_CLIENT_METRICS:
+            value = metrics[key]
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < 0):
+                raise ValueError(f"Invalid QSGD distortion measurement: {key}")
+            totals[key] += value
+        if type(metrics["qsgd_coordinate_count"]) is not int:
+            raise ValueError("QSGD coordinate count must be an integer")
+        maximum = max(maximum, metrics["qsgd_max_abs_error"])
+    coordinates = int(totals["qsgd_coordinate_count"])
+    if coordinates <= 0:
+        raise ValueError("QSGD coordinate count must be positive")
+    squared = totals["qsgd_quantization_squared_error"]
+    reference = totals["qsgd_input_squared_norm"]
+    return dict(
+        qsgd_clients=len(replies),
+        qsgd_coordinate_count=coordinates,
+        qsgd_max_abs_error=maximum,
+        qsgd_quantization_mse=squared / coordinates,
+        qsgd_quantization_squared_error=squared,
+        qsgd_input_squared_norm=reference,
+        qsgd_relative_squared_error=(squared / reference if reference else 0.0),
+    )
+
+
+def aggregate_llz_distortion(replies, p):
+    """Aggregate codec distortion across transmitted coordinates, not examples."""
+    totals = {key: 0.0 for key in LLZ_CLIENT_METRICS}
+    maximum = 0
+    for reply in replies:
+        metrics = reply.content["metrics"]
+        if any(key not in metrics for key in LLZ_CLIENT_METRICS):
+            raise ValueError("QSGD+LLZ reply is missing distortion measurements")
+        for key in LLZ_CLIENT_METRICS:
+            value = metrics[key]
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < 0):
+                raise ValueError(f"Invalid QSGD+LLZ distortion measurement: {key}")
+            totals[key] += value
+        observed_max = metrics["llz_max_code_error"]
+        symbols = metrics["llz_symbol_count"]
+        if type(observed_max) is not int or type(symbols) is not int or symbols <= 0:
+            raise ValueError("LLZ maximum code error and symbol count must be integers")
+        maximum = max(maximum, observed_max)
+    if maximum > p:
+        raise ValueError("Reported LLZ code error exceeds configured p")
+    if p == 0 and (totals["llz_code_squared_error"] != 0
+                   or totals["llz_reconstruction_squared_error"] != 0):
+        raise ValueError("Lossless LLZ reported nonzero secondary distortion")
+    symbols = int(totals["llz_symbol_count"])
+    squared = totals["llz_reconstruction_squared_error"]
+    reference = totals["llz_qsgd_squared_norm"]
+    return dict(
+        llz_p=p,
+        llz_clients=len(replies),
+        llz_symbol_count=symbols,
+        llz_max_code_error=maximum,
+        llz_code_mse=totals["llz_code_squared_error"] / symbols,
+        llz_reconstruction_squared_error=squared,
+        llz_qsgd_squared_norm=reference,
+        llz_relative_squared_error=(squared / reference if reference else 0.0),
+    )
 
 
 class CheckpointFedAvg(FedAvg):
@@ -99,6 +186,9 @@ class QSGDFedAvg(CheckpointFedAvg):
         replies = self.checked_replies(replies)
         if self.reference is None or self.reference_round != server_round:
             raise RuntimeError("QSGD aggregation has no matching round reference")
+        distortion = aggregate_qsgd_distortion(replies)
+        if self.method == "qsgd-llz":
+            distortion.update(aggregate_llz_distortion(replies, self.llz_p))
         decoded_replies = []
         for reply in replies:
             delta = decode_update(reply.content, self.reference, levels=self.levels, server_round=server_round,
@@ -106,7 +196,11 @@ class QSGDFedAvg(CheckpointFedAvg):
             # Grid has already logged the actual encoded message. These local
             # copies are used only to reuse Flower's sample-weighted aggregation.
             decoded = copy(reply)
-            decoded.content = RecordDict({"arrays": ArrayRecord(delta), "metrics": reply.content["metrics"],
+            aggregation_metrics = MetricRecord({
+                "train_loss": reply.content["metrics"]["train_loss"],
+                "num-examples": reply.content["metrics"]["num-examples"],
+            })
+            decoded.content = RecordDict({"arrays": ArrayRecord(delta), "metrics": aggregation_metrics,
                                           "client": reply.content["client"]})
             decoded_replies.append(decoded)
         average_delta, metrics = super().aggregate_train(server_round, decoded_replies)
@@ -115,6 +209,7 @@ class QSGDFedAvg(CheckpointFedAvg):
         if any(not torch.isfinite(value).all() for value in state.values()):
             raise ValueError("QSGD aggregation produced nonfinite weights")
         arrays = ArrayRecord(state)
+        metrics.update(distortion)
         self.current = (server_round, arrays, dict(metrics))
         return arrays, metrics
 
@@ -124,7 +219,7 @@ def main(grid: Grid, context: Context):
     config = dict(context.run_config)
     method, levels = compression_settings(config)
     config.update({"compression": method, "qsgd-levels": levels})
-    p, window = llz_settings(config) if method == "qsgd-llz" else (0, 128)
+    p, window = llz_settings(config, levels=levels) if method == "qsgd-llz" else (0, 128)
     if method == "qsgd-llz":
         config.update({"llz-p": p, "llz-window": window})
     manifest = read_manifest(config["manifest"], config["num-classes"], config["num-clients"])
@@ -138,6 +233,12 @@ def main(grid: Grid, context: Context):
         normalization="one L2 norm per tensor" if method != "none" else None,
         llz_p=p if method == "qsgd-llz" else None,
         llz_window=window if method == "qsgd-llz" else None,
+        qsgd_distortion=("summed over all client tensor coordinates relative to the "
+                         "original full-precision model deltas; reported in aggregated train metrics"
+                         if method != "none" else None),
+        llz_distortion=("summed over all client tensor coordinates relative to the "
+                        "dequantized QSGD updates; reported in aggregated train metrics"
+                        if method == "qsgd-llz" else None),
         downlink="uncompressed", error_feedback=False,
         rng="SeedSequence([seed, round, partition_id, 0x51534744]); sorted tensor names" if method != "none" else None)
     strategy = (QSGDFedAvg(experiment, config["num-clients"], levels, method=method, llz_p=p, llz_window=window) if method != "none"

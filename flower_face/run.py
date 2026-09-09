@@ -34,7 +34,8 @@ def main():
     parser.add_argument("--output-dir", type=Path, help="Directory for this run's experiment output")
     parser.add_argument("--compression", choices=["none", "qsgd", "qsgd-llz"], help="Client upload compression; default: none")
     parser.add_argument("--qsgd-levels", type=int, help="QSGD positive intervals s; default: 127")
-    parser.add_argument("--llz-p", type=int, choices=[0], help="LLZ tolerance; Flower currently supports lossless p=0 only")
+    parser.add_argument("--llz-p", type=int,
+                        help="LLZ tolerance in QSGD code levels; 0 is lossless")
     parser.add_argument("--llz-window", type=int, help="LLZ dictionary symbols per tensor; default: 128")
     test_options = parser.add_mutually_exclusive_group()
     test_options.add_argument("--skip-test", action="store_true", help="Use validation only (project default)")

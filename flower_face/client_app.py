@@ -4,7 +4,8 @@ from flwr.app import ArrayRecord, ConfigRecord, Context, Message, MetricRecord, 
 from flwr.clientapp import ClientApp
 
 from flower_face.task import Net, load_data, seed_everything, test, train as train_model
-from federated_compression import compression_settings, encode_update, llz_settings, update_metadata
+from federated_compression import (compression_settings, encode_update_with_stats,
+                                   llz_settings, update_metadata)
 
 app = ClientApp()
 
@@ -32,10 +33,12 @@ def train(msg: Message, context: Context):
     content = RecordDict({"metrics": MetricRecord({"train_loss": loss, "num-examples": len(loader.dataset)})})
     if method != "none":
         server_round = int(msg.content["config"]["server-round"])
-        p, window = llz_settings(config) if method == "qsgd-llz" else (0, 128)
-        content["qsgd"] = encode_update(model.state_dict(), reference, levels=levels,
-                                        seed=config["seed"], server_round=server_round, client_id=client_id,
-                                        method=method, llz_p=p, llz_window=window)
+        p, window = llz_settings(config, levels=levels) if method == "qsgd-llz" else (0, 128)
+        content["qsgd"], distortion = encode_update_with_stats(
+            model.state_dict(), reference, levels=levels, seed=config["seed"],
+            server_round=server_round, client_id=client_id, method=method,
+            llz_p=p, llz_window=window)
+        content["metrics"].update(distortion)
         content["update"] = ConfigRecord(update_metadata(method=method, levels=levels,
                                         server_round=server_round, llz_p=p, llz_window=window))
     else:

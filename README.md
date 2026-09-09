@@ -24,6 +24,7 @@ Flower is pinned to 1.36.0; this project runs locally with four simulated client
 | `flower_face/updates.py` | Backward-compatible import shim for earlier project code |
 | `flower_face/reproducibility.py` | Stable model/source hashes and recorded deterministic settings |
 | `flower_face/study.py` | Replay checks, paired seed experiments, and aggregate study summaries |
+| `flower_face/compression_study.py` | Resumable paired FedAvg/QSGD/QSGD+LLZ experiment matrix with exact replay gates |
 | `compression/check_qsgd.py` | Synthetic codec size/error check with a saved JSON report |
 | `flower_face/experiment.py` | Shared checkpoint saving, experiment metadata, and incremental history; no Flower imports |
 | `flower_face/check_training.py` | Centralized and tiny-batch training diagnostics using the same CNN |
@@ -104,14 +105,41 @@ not need to change.
 
 Available upload modes are `none`, `qsgd`, and `qsgd-llz`. QSGD is applied to
 each client's model delta relative to that round's global model. With
-`qsgd-llz`, the same quantized integer codes are encoded by LLZ-p. The integrated
-path currently fixes `p=0`, so QSGD and QSGD+LLZ must produce identical decoded
-updates, model hashes, and learning metrics; only their packet sizes may differ.
+`qsgd-llz`, the same quantized integer codes are encoded by LLZ-p. At `p=0`,
+QSGD and QSGD+LLZ must produce identical decoded updates, model hashes, and
+learning metrics; only their packet sizes may differ. Positive `p` values enable
+lossy LLZ matching and introduce a second error after QSGD quantization.
 
 ```powershell
 .venv\Scripts\python.exe -m flower_face.run --rounds 3 --compression qsgd --skip-test
 .venv\Scripts\python.exe -m flower_face.run --rounds 3 --compression qsgd-llz --qsgd-levels 127 --llz-window 128 --skip-test
+.venv\Scripts\python.exe -m flower_face.run --rounds 3 --compression qsgd-llz --qsgd-levels 127 --llz-p 1 --llz-window 128 --skip-test
 .venv\Scripts\python.exe -m flower_face.check_llz --rounds 3 --seed 42 --qsgd-levels 127 --llz-window 128
+```
+
+Every compressed client message includes QSGD error measured against the
+original full-precision model delta. QSGD+LLZ messages additionally include
+LLZ error measured against that same message's QSGD reconstruction. The server
+records coordinate-aggregated `qsgd_quantization_mse` and
+`qsgd_relative_squared_error`, validates the reported maximum LLZ code error
+against `p`, and records `llz_code_mse`,
+`llz_reconstruction_squared_error`, and `llz_relative_squared_error`. The
+reference for these metrics is the QSGD reconstruction, so they do not mix LLZ
+distortion with QSGD's original quantization error. These metric fields are
+included in the serialized communication totals.
+
+For the complete three-method, three-seed comparison under one frozen source
+snapshot:
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.compression_study --seeds 42 43 44 --rounds 300 --qsgd-levels 127 --llz-window 128
+```
+
+The study writes `study.json` after every attempt and can continue after an
+interruption. Supply the same protocol arguments and its directory:
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.compression_study --resume outputs\compression-study-<timestamp> --seeds 42 43 44 --rounds 300 --qsgd-levels 127 --llz-window 128
 ```
 
 For a different number of rounds:

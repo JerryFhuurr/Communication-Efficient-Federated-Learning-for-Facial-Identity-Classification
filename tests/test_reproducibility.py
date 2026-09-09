@@ -7,15 +7,13 @@ import torch
 from flwr.app import ArrayRecord, ConfigRecord, Message, MetricRecord, RecordDict
 from flwr.serverapp.strategy import FedAvg
 
-from compression.qsgd import encode
-import numpy as np
 from flower_face.experiment import Experiment
 from flower_face.experiment import atomic_replace
 from flower_face.reproducibility import model_hash, source_hash
 from flower_face.server_app import CheckpointFedAvg, QSGDFedAvg
 from flower_face.study import check_replay, snapshot, summarize
 from flower_face.task import Net, seed_everything
-from flower_face.updates import CODEC
+from flower_face.updates import CODEC, encode_update_with_stats
 
 
 def experiment(tmp_path):
@@ -35,8 +33,10 @@ def replies(method, nodes=(400, 200, 300, 100)):
         if method == 'none':
             content['arrays'] = ArrayRecord({'weight': torch.tensor([value])})
         else:
-            content['qsgd'] = ConfigRecord({'weight': encode(np.array([value], dtype=np.float32),
-                                                            levels=127, rng=np.random.default_rng(1))})
+            content['qsgd'], distortion = encode_update_with_stats(
+                {'weight': torch.tensor([value])}, {'weight': torch.zeros(1)},
+                levels=127, seed=1, server_round=1, client_id=partition)
+            content['metrics'].update(distortion)
             content['update'] = ConfigRecord({'codec': CODEC, 'levels': 127, 'server-round': 1})
         output.append(Message(content, reply_to=instruction))
     return output

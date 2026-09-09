@@ -9,11 +9,14 @@ from flwr.app import ArrayRecord, ConfigRecord, Context, Message, MetricRecord, 
 from flwr.supercore.inflatable.inflatable_object import get_all_nested_objects
 from flwr.supercore.inflatable.inflatable_utils import inflate_object_from_contents
 
-from compression.qsgd import encode
+from compression.qsgd import decode as decode_qsgd, encode
 from compression import qsgd_llz
 from flower_face import client_app, server_app
 from flower_face.communication import measure_message
-from flower_face.updates import CODEC, compression_settings, decode_update, encode_update, update_metadata
+from flower_face.server_app import aggregate_llz_distortion, aggregate_qsgd_distortion
+from flower_face.updates import (CODEC, compression_settings, decode_update,
+                                 encode_update, encode_update_with_stats,
+                                 update_metadata)
 
 
 class TinyNet(torch.nn.Module):
@@ -235,8 +238,75 @@ def test_llz_integration_rejects_wrong_codec_and_packet_settings(corruption):
         decode_update(content, reference, levels=127, server_round=1, method='qsgd-llz')
 
 
-@pytest.mark.parametrize('settings', [{'llz-p': 1}, {'llz-p': 0.0}, {'llz-p': False},
+@pytest.mark.parametrize('settings', [{'llz-p': -1}, {'llz-p': 255}, {'llz-p': 0.0}, {'llz-p': False},
     {'llz-window': 0}, {'llz-window': True}, {'llz-window': 65536}])
-def test_flower_requires_lossless_llz_and_valid_window(settings):
+def test_flower_requires_valid_lossy_llz_settings(settings):
     with pytest.raises(ValueError):
         compression_settings(dict(compression='qsgd-llz', **settings))
+
+
+def test_flower_accepts_lossy_llz_within_qsgd_alphabet():
+    assert compression_settings(dict(compression='qsgd-llz', **{
+        'qsgd-levels': 7, 'llz-p': 1, 'llz-window': 64})) == ('qsgd-llz', 7)
+    assert compression_settings(dict(compression='qsgd-llz', **{
+        'qsgd-levels': 7, 'llz-p': 14, 'llz-window': 64})) == ('qsgd-llz', 7)
+
+
+@pytest.mark.parametrize('p', [0, 1])
+def test_llz_secondary_distortion_is_measured_against_same_qsgd_draw(p):
+    reference = {'weight': torch.zeros(4096)}
+    trained = {'weight': torch.from_numpy(
+        np.random.default_rng(12).normal(size=4096).astype(np.float32))}
+    packets, stats = encode_update_with_stats(
+        trained, reference, levels=127, seed=42, server_round=3,
+        client_id=2, method='qsgd-llz', llz_p=p, llz_window=128)
+    dense = encode_update(trained, reference, levels=127, seed=42,
+                          server_round=3, client_id=2, method='qsgd')
+    qsgd_values = qsgd_llz.decode(packets['weight'])
+    dense_values = decode_qsgd(dense['weight'])
+    error = qsgd_values.astype(np.float64) - dense_values.astype(np.float64)
+    assert stats['llz_symbol_count'] == 4096
+    assert stats['qsgd_coordinate_count'] == 4096
+    assert stats['qsgd_quantization_squared_error'] >= 0
+    assert stats['qsgd_input_squared_norm'] > 0
+    assert stats['llz_max_code_error'] <= p
+    assert stats['llz_reconstruction_squared_error'] == pytest.approx(float(np.sum(error * error)))
+    if p == 0:
+        assert stats['llz_code_squared_error'] == 0
+        assert stats['llz_reconstruction_squared_error'] == 0
+    else:
+        assert stats['llz_code_squared_error'] > 0
+        assert stats['llz_reconstruction_squared_error'] > 0
+
+
+def test_server_aggregates_llz_distortion_by_coordinates_and_validates_bound():
+    def reply(code_error, squared, reference, maximum, symbols):
+        return SimpleNamespace(content={'metrics': MetricRecord({
+            'llz_code_squared_error': code_error,
+            'llz_reconstruction_squared_error': squared,
+            'llz_qsgd_squared_norm': reference,
+            'llz_max_code_error': maximum,
+            'llz_symbol_count': symbols,
+        })})
+    replies = [reply(3.0, 2.0, 8.0, 1, 10), reply(1.0, 1.0, 4.0, 1, 6)]
+    result = aggregate_llz_distortion(replies, p=1)
+    assert result['llz_code_mse'] == 0.25
+    assert result['llz_relative_squared_error'] == 0.25
+    assert result['llz_max_code_error'] == 1
+    with pytest.raises(ValueError, match='exceeds configured p'):
+        aggregate_llz_distortion([reply(1.0, 1.0, 1.0, 2, 1)], p=1)
+
+
+def test_server_aggregates_qsgd_distortion_separately():
+    def reply(squared, reference, maximum, coordinates):
+        return SimpleNamespace(content={'metrics': MetricRecord({
+            'qsgd_quantization_squared_error': squared,
+            'qsgd_input_squared_norm': reference,
+            'qsgd_max_abs_error': maximum,
+            'qsgd_coordinate_count': coordinates,
+        })})
+    result = aggregate_qsgd_distortion(
+        [reply(2.0, 8.0, 0.5, 10), reply(1.0, 4.0, 0.25, 5)])
+    assert result['qsgd_quantization_mse'] == 0.2
+    assert result['qsgd_relative_squared_error'] == 0.25
+    assert result['qsgd_max_abs_error'] == 0.5

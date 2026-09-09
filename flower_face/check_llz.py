@@ -15,11 +15,23 @@ def compare(baseline, compressed):
     """Require full learning equivalence before reporting communication savings."""
     if (baseline['config']['compression'], compressed['config']['compression']) != ('qsgd', 'qsgd-llz'):
         raise RuntimeError('Expected QSGD baseline and QSGD+LLZ comparison')
-    compression_settings(compressed['config'])  # Enforces p=0, including direct calls.
+    compression_settings(compressed['config'])
+    if compressed['config'].get('llz-p', 0) != 0:
+        raise ValueError('Exact QSGD/LLZ replay comparison requires llz-p=0')
     check_pair(baseline, compressed)
     if baseline['metadata']['communication_measurement'] != compressed['metadata']['communication_measurement']:
         raise RuntimeError('Communication measurement boundaries differ')
-    if baseline['replay'] != compressed['replay'] or baseline['best'] != compressed['best']:
+    def learning_replay(run):
+        result = []
+        for row in run['replay']:
+            if not isinstance(row.get('train'), dict):
+                raise RuntimeError('Learning replay has invalid training metrics')
+            result.append(dict(row, train={
+                key: value for key, value in row['train'].items()
+                if not key.startswith(('qsgd_', 'llz_'))}))
+        return result
+
+    if learning_replay(baseline) != learning_replay(compressed) or baseline['best'] != compressed['best']:
         raise RuntimeError('Lossless integration mismatch: model hashes, learning metrics, or selected checkpoint differ')
     methods = {}
     for result in (baseline, compressed):
