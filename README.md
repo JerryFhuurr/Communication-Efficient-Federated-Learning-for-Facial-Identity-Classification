@@ -98,6 +98,17 @@ in `experiments/images.toml`, then run the complete comparison:
 
 No compression, Flower, aggregation, or reporting code needs to change.
 
+For the local DigiFace-1M partition, prepare the versioned experiment input
+without copying its images:
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.prepare_generic --images data\subjects_0-1999_72_imgs --output data\digiface-100\manifest.json --clients 4 --max-classes 100 --max-images-per-class 50
+.venv\Scripts\python.exe -m flower_face.compression_study --config experiments\digiface.toml
+```
+
+Numeric identity folders use natural ordering, so this selects subjects 0–99.
+The 5,000-image manifest stores deterministic splits and source-file hashes.
+
 ## Validate the framework without images
 
 ```powershell

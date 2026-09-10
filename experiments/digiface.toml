@@ -1,0 +1,15 @@
+# DigiFace-1M subjects 0-1999: 100 identities x 50 images, four IID clients.
+[study]
+seeds = [42, 43, 44]
+rounds = 30
+qsgd-levels = 127
+llz-p-values = [0, 1]
+llz-window = 128
+
+[task]
+task-module = "flower_face.task"
+manifest = "data/digiface-100/manifest.json"
+num-classes = 100
+num-clients = 4
+augmentation = "none"
+image-size = 64

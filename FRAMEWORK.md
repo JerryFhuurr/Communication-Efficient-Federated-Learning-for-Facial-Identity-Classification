@@ -37,6 +37,10 @@ manifest when multiple files share the same subject or acquisition session.
 .venv\Scripts\python.exe -m flower_face.prepare_generic --images C:\datasets\my-images --output data/custom/manifest.json --clients 4
 ```
 
+Large class-folder datasets can be bounded without copying images by adding
+`--max-classes N` and `--max-images-per-class M`. Numeric class names are sorted
+numerically; per-class image selection and splits are deterministic for the seed.
+
 Edit `experiments/images.toml`: set `num-classes` to the number printed by the
 preparer and `manifest` to the new file. The image root is absolute. File hashes
 are recorded and checked while loading, preventing changed images from silently

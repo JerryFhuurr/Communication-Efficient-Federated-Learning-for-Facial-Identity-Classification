@@ -3,6 +3,7 @@
 These TOML files separate experiment choices from Python implementation code.
 
 - `images.toml` is the starting point for any class-folder image dataset.
+- `digiface.toml` runs the prepared 100-identity DigiFace-1M subset.
 - `synthetic.toml` is a fast end-to-end check of every compression path.
 - `synthetic-grid.toml` demonstrates a QSGD-level and LLZ-window grid.
 

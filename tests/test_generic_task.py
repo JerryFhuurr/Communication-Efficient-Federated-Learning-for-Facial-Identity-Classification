@@ -1,4 +1,5 @@
 import json
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
@@ -102,6 +103,22 @@ def test_prepare_class_folders(tmp_path):
 def test_prepare_rejects_missing_image_directory(tmp_path):
     with pytest.raises(ValueError, match='does not exist'):
         prepare(tmp_path/'manifest.json', images=tmp_path/'missing')
+
+
+def test_prepare_can_bound_numeric_identity_folders(tmp_path):
+    from PIL import Image
+    for identity in ('10', '2', '1'):
+        folder = tmp_path/'images'/identity
+        folder.mkdir(parents=True)
+        for index in range(16):
+            Image.new('RGB', (4, 4), (int(identity), index, 0)).save(folder/f'{index}.png')
+    data = prepare(tmp_path/'bounded.json', images=tmp_path/'images', clients=4,
+                   max_classes=2, max_images_per_class=12)
+    assert data['identities'] == ['1', '2']
+    assert len(data['examples']) == 24
+    assert {row['identity'] for row in data['examples']} == {'1', '2'}
+    counts = Counter(row['client_id'] for row in data['examples'] if row['split'] == 'train')
+    assert max(counts.values()) - min(counts.values()) <= 2
 
 
 def test_task_preflight_calls_task_specific_validation(tmp_path, monkeypatch):
