@@ -13,7 +13,7 @@ from flower_face.reproducibility import model_hash, source_hash
 from flower_face.server_app import CheckpointFedAvg, QSGDFedAvg
 from flower_face.study import check_replay, snapshot, summarize
 from flower_face.task import Net, seed_everything
-from flower_face.updates import CODEC, encode_update_with_stats
+from federated_compression import CODEC, encode_update_with_stats
 
 
 def experiment(tmp_path):

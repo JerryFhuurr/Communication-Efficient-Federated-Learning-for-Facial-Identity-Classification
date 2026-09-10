@@ -17,7 +17,11 @@ def prepare(output, *, images=None, clients=4, seed=42, synthetic=False):
         centers = rng.normal(size=(3, 8)) * 2
         groups = [[(f'{label}-{i}', None) for i in range(clients*12)] for label in range(3)]
     else:
+        if images is None:
+            raise ValueError('images is required unless synthetic=True')
         images = Path(images).resolve()
+        if not images.is_dir():
+            raise ValueError(f'Image directory does not exist: {images}')
         folders = sorted(p for p in images.iterdir() if p.is_dir())
         classes = [p.name for p in folders]
         groups = [[(p.relative_to(images).as_posix(), p) for p in sorted(folder.rglob('*'))

@@ -14,9 +14,9 @@ from compression import qsgd_llz
 from flower_face import client_app, server_app
 from flower_face.communication import measure_message
 from flower_face.server_app import aggregate_llz_distortion, aggregate_qsgd_distortion
-from flower_face.updates import (CODEC, compression_settings, decode_update,
-                                 encode_update, encode_update_with_stats,
-                                 update_metadata)
+from federated_compression import (CODEC, compression_settings, decode_update,
+                                   encode_update, encode_update_with_stats,
+                                   update_metadata)
 
 
 class TinyNet(torch.nn.Module):

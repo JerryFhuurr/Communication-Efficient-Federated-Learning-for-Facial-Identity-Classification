@@ -11,9 +11,8 @@ from uuid import uuid4
 
 import tomli_w
 
-from flower_face.task import read_manifest, validate_augmentation, validate_weight_decay
 from federated_compression import compression_settings
-from flower_face.task_api import resolve, validate as validate_task
+from flower_face.task_api import validate as validate_task
 
 
 def default_config(root):
@@ -51,7 +50,6 @@ def main():
         if getattr(args, key) is not None:
             config[key.replace('_', '-')] = getattr(args, key)
     manifest = (args.manifest or root / config["manifest"]).resolve()
-    resolve(config).read_manifest(manifest, config["num-classes"], config["num-clients"])
     if args.rounds is not None:
         if args.rounds < 1:
             parser.error("--rounds must be positive")
@@ -89,9 +87,8 @@ def main():
             parser.error("--llz-window must be in [1, 65535]")
         config["llz-window"] = args.llz_window
     try:
-        validate_weight_decay(config.get("weight-decay", 0.0))
-        validate_augmentation(config.get("augmentation", "none"))
         compression_settings(config)
+        validate_task(config)
     except ValueError as error:
         parser.error(str(error))
     raise SystemExit(launch(config, root=root))

@@ -2,7 +2,12 @@
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
-from flower_face.task import read_manifest, train, test
+from flower_face.task import read_manifest, train, test, validate_weight_decay
+
+
+def validate_config(config):
+    """Validate settings used by the vector task."""
+    validate_weight_decay(config.get('weight-decay', 0.0))
 
 
 class Net(nn.Module):

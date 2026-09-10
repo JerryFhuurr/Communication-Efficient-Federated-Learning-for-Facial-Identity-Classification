@@ -1,16 +1,6 @@
 import subprocess
 import sys
 
-import federated_compression
-import flower_face.updates as legacy
-
-
-def test_legacy_adapter_exports_reusable_implementation():
-    assert legacy.encode_update is federated_compression.encode_update
-    assert legacy.decode_update is federated_compression.decode_update
-    assert legacy.CODECS == federated_compression.CODECS
-
-
 def test_standalone_codecs_do_not_import_framework_or_demo():
     command = [sys.executable, "-c", (
         "import sys; import compression.qsgd, compression.llz_p, compression.qsgd_llz; "

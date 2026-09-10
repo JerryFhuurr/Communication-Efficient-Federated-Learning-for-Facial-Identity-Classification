@@ -63,6 +63,9 @@ table. Implement these callables, following `synthetic_task.py`:
   with a sized dataset. A missing client ID means the complete split.
 * `train(model, loader, epochs, lr, *, weight_decay=0.0)` returns mean local loss.
 * `test(model, loader)` returns `(mean_loss, accuracy)`.
+* Optional `validate_config(config)` checks task-specific settings before Flower
+  starts. Use it for input dimensions, transforms, optimizer options, or other
+  rules that do not belong to the shared compression runtime.
 
 The historical `identities` and `image_variant` field names are metadata, not a
 requirement for face images. The synthetic example uses ordinary vector classes.
@@ -139,3 +142,10 @@ preparation/loading. The default CPU implementation and pinned Flower/PyTorch
 versions define the supported runtime. Native Windows Ray can emit shutdown
 exceptions; distinguish these from failed client replies and incomplete runs.
 No inference of transport delivery or speedup is made from smaller packets.
+
+## Repository hygiene
+
+`data/`, `outputs/`, `.flwr/`, virtual environments, caches and package metadata
+are intentionally ignored by Git. Keep completed study directories when their
+results are still needed because they contain frozen source and audit evidence.
+Runtime and cache directories can be deleted at any time and are recreated.

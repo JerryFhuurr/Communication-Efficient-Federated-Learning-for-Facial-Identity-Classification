@@ -31,6 +31,11 @@ def validate(config):
     if isinstance(lr, bool) or not isinstance(lr, (float,int)) or not math.isfinite(lr) or lr <= 0:
         raise ValueError('learning-rate must be finite and positive')
     task = resolve(config)
+    validate_config = getattr(task, 'validate_config', None)
+    if validate_config is not None:
+        if not callable(validate_config):
+            raise ValueError('Task validate_config must be callable')
+        validate_config(config)
     task.read_manifest(config['manifest'], config['num-classes'], config['num-clients'])
     model = task.Net(config['num-classes'])
     if config.get('compression','none') != 'none':

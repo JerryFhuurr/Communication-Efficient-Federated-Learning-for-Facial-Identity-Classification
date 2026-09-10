@@ -99,6 +99,25 @@ def test_prepare_class_folders(tmp_path):
         list(task.load_data(config,0))
 
 
+def test_prepare_rejects_missing_image_directory(tmp_path):
+    with pytest.raises(ValueError, match='does not exist'):
+        prepare(tmp_path/'manifest.json', images=tmp_path/'missing')
+
+
+def test_task_preflight_calls_task_specific_validation(tmp_path, monkeypatch):
+    from flower_face.task_api import validate
+    from flower_face import synthetic_task
+    path = tmp_path/'manifest.json'
+    prepare(path, synthetic=True)
+    called = []
+    monkeypatch.setattr(synthetic_task, 'validate_config', lambda config: called.append(config['seed']))
+    config = default_config(Path(__file__).resolve().parents[1])
+    config.update({'task-module':'flower_face.synthetic_task', 'manifest':str(path),
+                   'num-classes':3, 'compression':'none'})
+    validate(config)
+    assert called == [config['seed']]
+
+
 def test_task_preflight_rejects_integer_buffers(tmp_path, monkeypatch):
     from flower_face.task_api import validate
     from flower_face import synthetic_task

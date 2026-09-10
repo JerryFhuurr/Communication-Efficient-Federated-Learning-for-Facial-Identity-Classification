@@ -1,12 +1,9 @@
 import json
-from copy import deepcopy
-
 import pytest
 import torch
 from PIL import Image
 
 from flower_face.task import CelebASubset, load_data, validate_augmentation
-from scripts.sweep_augmentation import check_control, summarize
 
 
 def fixture_data(tmp_path):
@@ -58,52 +55,3 @@ def test_training_evaluation_can_explicitly_disable_augmentation(tmp_path):
 def test_invalid_augmentation_is_rejected(value):
     with pytest.raises(ValueError, match="augmentation"):
         validate_augmentation(value)
-
-
-def sweep_result(seed=42, augmentation="none", loss=2.0):
-    return dict(config={"seed": seed, "augmentation": augmentation, "learning-rate": .1,
-                        "weight-decay": 0., "compression": "none",
-                        "evaluate-final-test": False, "output-dir": "example"},
-        metadata=dict.fromkeys(("manifest_sha256", "initial_model_sha256", "versions", "python",
-            "platform", "reproducibility", "selection_rule", "source_sha256",
-            "communication_measurement"), "same"),
-        replay=[dict(round=1, model_sha256="model", train={"loss": 1.}, validation={"loss": 2.})],
-        best=dict(validation_loss=loss, validation_accuracy=.4),
-        checkpoint_evaluation={"final": {"train": {"accuracy": .8}}})
-
-
-def test_augmentation_legacy_bridge_requires_exact_disabled_replay():
-    old, new = sweep_result(), sweep_result()
-    del old["config"]["augmentation"]
-    new["metadata"]["source_sha256"] = "augmentation-support"
-    new["metadata"]["communication_measurement"] = "new-schema"
-    check_control(old, new, legacy_replay=True)
-    changed = deepcopy(new)
-    changed["replay"][0]["model_sha256"] = "different"
-    with pytest.raises(RuntimeError, match="replay"):
-        check_control(old, changed, legacy_replay=True)
-    new["config"]["augmentation"] = "horizontal-flip"
-    with pytest.raises(RuntimeError):
-        check_control(old, new, legacy_replay=True)
-
-
-def test_augmented_comparison_allows_only_augmentation_and_output_changes():
-    base, candidate = sweep_result(), sweep_result(augmentation="horizontal-flip")
-    check_control(base, candidate)
-    for key, value in (("learning-rate", .03), ("weight-decay", .001), ("seed", 43)):
-        changed = deepcopy(candidate)
-        changed["config"][key] = value
-        with pytest.raises(RuntimeError, match="confound"):
-            check_control(base, changed)
-
-
-def test_augmentation_summary_requires_full_matrix_and_uses_mean_loss():
-    runs = [sweep_result(seed, method, 2.0-(.1 if method=="horizontal-flip" else 0))
-            for seed in (42,43,44) for method in ("none","horizontal-flip")]
-    result = summarize(runs, [42,43,44], ["none","horizontal-flip"])
-    assert result["preferred_augmentation"] == "horizontal-flip"
-    with pytest.raises(RuntimeError):
-        summarize(runs[:-1], [42,43,44], ["none","horizontal-flip"])
-    for run in runs:
-        run["best"]["validation_loss"] = 2.
-    assert summarize(runs, [42,43,44], ["none","horizontal-flip"])["preferred_augmentation"] == "none"

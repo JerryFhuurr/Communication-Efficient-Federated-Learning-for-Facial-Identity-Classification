@@ -108,6 +108,15 @@ def validate_weight_decay(value):
     return float(value)
 
 
+def validate_config(config):
+    """Validate configuration owned by the image-classification task."""
+    validate_weight_decay(config.get("weight-decay", 0.0))
+    validate_augmentation(config.get("augmentation", "none"))
+    image_size = config.get("image-size")
+    if type(image_size) is not int or image_size < 8:
+        raise ValueError("image-size must be an integer of at least 8")
+
+
 def train(model, loader, epochs, lr, device="cpu", *, weight_decay=0.0):
     if epochs < 1 or lr <= 0:
         raise ValueError("local-epochs and learning-rate must be positive.")
