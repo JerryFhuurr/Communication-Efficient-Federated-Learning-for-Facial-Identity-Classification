@@ -1,0 +1,20 @@
+
+3. Show the compression savings for p=0 and p=1
+.venv\Scripts\python.exe -m compression.check_llz --levels 127 --p 0 1 --window-size 128
+
+Explain: “This compares standalone packet sizes on synthetic vectors. p=0 preserves the QSGD codes exactly; p=1 allows additional distortion.”
+
+4. Demonstrate real federated training on DigiFace
+.venv\Scripts\python.exe -m flower_face.run --manifest data/digiface-100/manifest.json --num-classes 100 --num-clients 4 --rounds 3 --seed 42 --augmentation none --compression qsgd-llz --qsgd-levels 127 --llz-p 0 --llz-window 128
+
+Explain: “Four simulated clients train locally, compress their updates using QSGD+LLZ, and send them to the server for aggregation.”
+This uses the existing 5,000-image subset and 64×64 preprocessing. Three rounds demonstrate functionality; they are insufficient to assess final accuracy.
+
+5. Show the completed CelebA comparison
+Regenerate its report and plots:
+.venv\Scripts\python.exe -m flower_face.report outputs\compression-study-20260909T133958009207Z
+
+Open the report folder:
+Invoke-Item .\outputs\compression-study-20260909T133958009207Z\report
+
+One correction to our earlier meeting wording: the saved study already contains p=1 runs alongside p=0 across seeds 42–44. You can say that p=0 established correctness and that preliminary p=1 experiments have also been performed. Top-k and LLZ-SI remain future extensions.

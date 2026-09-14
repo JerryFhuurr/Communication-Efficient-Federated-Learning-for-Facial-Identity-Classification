@@ -9,6 +9,8 @@ __pycache__/
 data/
 img_align_celeba/
 outputs/
+# Local experiment artifacts and result reports (keep papers/README.md tracked).
+/papers/results/
 identity_CelebA.txt
 list_eval_partition.txt
 .flwr/
