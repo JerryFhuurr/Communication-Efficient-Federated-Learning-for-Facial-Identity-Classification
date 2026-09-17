@@ -29,6 +29,7 @@ def main():
     parser.add_argument('--task-module', help='Task implementation module under flower_face')
     parser.add_argument('--num-classes', type=int)
     parser.add_argument('--num-clients', type=int)
+    parser.add_argument('--image-size', type=int, help='Input image size owned by the selected task')
     parser.add_argument("--seed", type=int, help="Training/codec seed; keeps the manifest and data split fixed")
     parser.add_argument("--lr", type=float, help="SGD learning rate; default: project configuration")
     parser.add_argument("--weight-decay", type=float, help="SGD L2 weight decay; default: 0")
@@ -46,7 +47,7 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     config = default_config(root)
-    for key in ('task_module', 'num_classes', 'num_clients'):
+    for key in ('task_module', 'num_classes', 'num_clients', 'image_size'):
         if getattr(args, key) is not None:
             config[key.replace('_', '-')] = getattr(args, key)
     manifest = (args.manifest or root / config["manifest"]).resolve()

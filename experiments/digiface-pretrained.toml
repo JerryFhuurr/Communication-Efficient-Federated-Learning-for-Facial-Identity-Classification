@@ -1,0 +1,22 @@
+# Frozen ImageNet ResNet-18; head-only federation, not full-model fine-tuning.
+# Extract features first with flower_face.prepare_pretrained.
+# Seed-42 uncompressed pilot: selected round 60, validation accuracy 57.3%.
+# Provisional result; compressed methods and further seeds are not yet evaluated.
+[study]
+seeds = [42]
+rounds = 60
+qsgd-levels = 127
+llz-p-values = [0, 1]
+llz-window = 128
+
+[task]
+task-module = "flower_face.pretrained_task"
+manifest = "data/digiface-resnet18/manifest.json"
+num-classes = 100
+num-clients = 4
+augmentation = "horizontal-flip"
+image-size = 224
+learning-rate = 0.01
+weight-decay = 0.0
+batch-size = 16
+local-epochs = 1

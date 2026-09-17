@@ -109,6 +109,59 @@ without copying its images:
 Numeric identity folders use natural ordering, so this selects subjects 0–99.
 The 5,000-image manifest stores deterministic splits and source-file hashes.
 
+## Frozen pretrained image model
+
+`flower_face.pretrained_task` trains a linear 512-to-class head on cached
+ResNet-18 features. The backbone uses TorchVision's fixed
+`ResNet18_Weights.IMAGENET1K_V1` ImageNet weights, **not face-specific weights**.
+Preprocessing follows the weights' resize/crop-to-224 and ImageNet normalization.
+The manifest retains every original identity, split and client assignment.
+Original and horizontally flipped features are cached; only training samples
+randomly choose a view. Validation/test always use the original view.
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.prepare_pretrained --manifest data\digiface-100\manifest.json --output data\digiface-resnet18
+.venv\Scripts\python.exe -m flower_face.run --task-module flower_face.pretrained_task --manifest data\digiface-resnet18\manifest.json --num-classes 100 --num-clients 4 --image-size 224 --rounds 60 --seed 42 --lr 0.01 --augmentation horizontal-flip --compression none --skip-test --output-dir outputs\digiface-pretrained-pilot
+```
+
+Preparation can use `--weights PATH` for a downloaded official weights file;
+its checksum is verified. It refuses to overwrite a nonempty output directory.
+Keep the source manifest and prepared directory, including the weights, to
+reproduce inference. A head checkpoint alone is not an end-to-end face model.
+
+At 100 classes, 51,300 trainable parameters (205,200 raw FP32 bytes) are
+federated. The frozen backbone is not transmitted each round. This is a
+head-only transfer-learning experiment, not full-backbone fine-tuning; do not
+attribute reduced message sizes to compression. Weight distribution and feature
+extraction costs are recorded in the prepared manifest and excluded from Flower
+message totals. Preparation uses fixed weights only; no statistics or parameters
+are fit to validation/test samples. The preprocessing cache is an offline local
+optimization, not a private/distributed feature-extraction implementation.
+
+Reference: [TorchVision ResNet-18 weights](https://docs.pytorch.org/vision/0.13/models/generated/torchvision.models.resnet18.html).
+
+For inference on a new, already cropped face, use the selected head checkpoint
+and the same prepared manifest. No feature cache is needed for inference, but the
+manifest and its local backbone weight file must be kept together:
+
+```powershell
+$selectedHead = (Get-Content outputs\pretrained-tuning-batch\comparison.json -Raw | ConvertFrom-Json).selected_checkpoint
+.venv\Scripts\python.exe -m flower_face.predict_pretrained --checkpoint "$selectedHead" --manifest data\digiface-resnet18\manifest.json --image path\to\cropped-face.png --top-k 5
+```
+
+Replace the image path with your input. Predictions are restricted to the
+manifest's known identities; this command neither detects faces nor rejects
+unknown people. Softmax scores are not calibrated confidence estimates.
+The loader verifies the checkpoint/manifest association and frozen-weight hash
+before reconstructing the complete image-to-label pipeline.
+
+The predictor also supports `flower_face.pretrained_mlp_task`, a 512-to-256-to-class
+ReLU head on the same cached features. It selects the architecture from the saved
+checkpoint. For the newer head-improvement batch, obtain `selected_checkpoint`
+from `outputs/head-improvement-batch/comparison.json` instead of the earlier batch.
+At 100 classes the nonlinear head has 157,028 trainable parameters, compared with
+51,300 for the linear head; the pretrained backbone remains frozen in both cases.
+
 ## Validate the framework without images
 
 ```powershell

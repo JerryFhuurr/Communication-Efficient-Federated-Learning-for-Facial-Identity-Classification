@@ -1,0 +1,27 @@
+# Uncompressed validation baseline: 72.47% mean, 0.46 pp sample SD across seeds 42-44.
+# Compression methods have not been evaluated at these settings; test data unused.
+[study]
+seeds = [
+    42,
+    43,
+    44,
+]
+rounds = 60
+qsgd-levels = 127
+llz-p-values = [
+    0,
+    1,
+]
+llz-window = 128
+
+[task]
+task-module = "flower_face.pretrained_task"
+manifest = "data/digiface-resnet18/manifest.json"
+num-classes = 100
+num-clients = 4
+augmentation = "horizontal-flip"
+image-size = 224
+learning-rate = 0.1
+weight-decay = 0.0
+batch-size = 16
+local-epochs = 1
