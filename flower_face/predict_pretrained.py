@@ -1,4 +1,4 @@
-"""Classify one cropped face with a frozen ResNet-18 and a saved FL head."""
+"""Classify one cropped face with a saved ResNet-18 head or fine-tuned tail."""
 import argparse
 import hashlib
 import json
@@ -10,6 +10,7 @@ from torch import nn
 from torchvision.models import resnet18, ResNet18_Weights
 from flower_face.pretrained_task import Net
 from flower_face.pretrained_mlp_task import Net as MLPHead
+from flower_face.finetune_task import Net as FineTuneTail
 
 
 def load_predictor(checkpoint, manifest_path):
@@ -21,11 +22,15 @@ def load_predictor(checkpoint, manifest_path):
         raise ValueError('Checkpoint and feature manifest do not match')
     if saved['identities'] != manifest['identities']:
         raise ValueError('Checkpoint identity mapping differs from manifest')
-    heads = {'flower_face.pretrained_task': Net, 'flower_face.pretrained_mlp_task': MLPHead}
+    heads = {'flower_face.pretrained_task': Net, 'flower_face.pretrained_mlp_task': MLPHead,
+             'flower_face.finetune_task': FineTuneTail}
     if saved['config']['task-module'] not in heads:
-        raise ValueError('Expected a frozen ResNet-18 head checkpoint')
+        raise ValueError('Expected a supported ResNet-18 checkpoint')
     meta = manifest['feature_extractor']
-    if meta['weights'] != 'ResNet18_Weights.IMAGENET1K_V1' or meta['dimension'] != 512:
+    fine_tuned = saved['config']['task-module'] == 'flower_face.finetune_task'
+    valid_shape = (meta.get('stage') == 'layer3' and meta.get('shape') == [256,14,14]
+                   if fine_tuned else meta.get('dimension') == 512)
+    if meta['weights'] != 'ResNet18_Weights.IMAGENET1K_V1' or not valid_shape:
         raise ValueError('Unsupported feature extractor')
     weights_path = manifest_path.parent / meta['weights_file']
     if hashlib.sha256(weights_path.read_bytes()).hexdigest() != meta['weights_sha256']:
@@ -34,7 +39,10 @@ def load_predictor(checkpoint, manifest_path):
     with torch.random.fork_rng(devices=[]):
         backbone = resnet18(weights=None)
         backbone.load_state_dict(torch.load(weights_path, map_location='cpu', weights_only=True))
-        backbone.fc = nn.Identity()
+        if fine_tuned:
+            backbone = nn.Sequential(*list(backbone.children())[:7])
+        else:
+            backbone.fc = nn.Identity()
         head = heads[saved['config']['task-module']](len(manifest['identities']))
         head.load_state_dict(saved['state_dict'])
     model = nn.Sequential(backbone, head).requires_grad_(False).eval()

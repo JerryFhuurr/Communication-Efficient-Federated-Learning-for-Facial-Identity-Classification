@@ -162,6 +162,56 @@ from `outputs/head-improvement-batch/comparison.json` instead of the earlier bat
 At 100 classes the nonlinear head has 157,028 trainable parameters, compared with
 51,300 for the linear head; the pretrained backbone remains frozen in both cases.
 
+## Fine-tune the final ResNet stage
+
+`flower_face.finetune_task` trains ResNet-18 `layer4` and the linear classifier.
+The earlier layers stay frozen, so `prepare_finetune` caches their spatial output
+once (float32, original and horizontal-flip views). The 5,000-image demo cache
+uses about 2 GB. Existing splits and identity labels are preserved; extraction
+does not fit on the data or evaluate the test split.
+
+```powershell
+$warmHead = (Get-Content outputs\head-improvement-batch\comparison.json -Raw | ConvertFrom-Json).selected_checkpoint
+.venv\Scripts\python.exe -m flower_face.prepare_finetune --source-manifest data\digiface-resnet18\manifest.json --output data\digiface-resnet18-layer3 --head-checkpoint "$warmHead"
+.venv\Scripts\python.exe -m flower_face.finetune_study --manifest data\digiface-resnet18-layer3\manifest.json --baseline (Split-Path "$warmHead") --output outputs\finetune-layer4-batch
+```
+
+Reuse a completed intermediate cache; preparation requires an empty destination.
+The bounded batch runs 15 additional rounds at layer4 learning rates 0.001 and
+0.003 on seed 42. The classifier uses 10 times that rate. If the best validation
+loss improves over the warm-start baseline, the selected setting runs on seeds
+43 and 44. All runs use the same selected seed-42 head, so confirmation varies
+fine-tuning randomness only. The runner saves provenance, audited results and
+plots under its output directory and refuses to overwrite it.
+
+BatchNorm affine parameters train, but running statistics remain fixed. The
+current task accepts uncompressed training only: compression of its integer
+BatchNorm buffers needs an explicit policy before integration. CPU clients have
+a 900-second response timeout. Only layer4/head state is federated; prefix
+distribution, cache extraction and earlier warm-start training are excluded
+from the additional rounds' communication counts.
+
+If a batch stops, repeat its command with `--resume`. Completed results are
+verified and reused; interrupted attempts remain intact, and only incomplete
+settings restart in separate attempt directories. The CLI prevents automatic
+Windows idle sleep while running and restores the request on exit; it does not
+prevent manually putting the computer to sleep.
+
+For another dataset, first prepare its generic manifest and frozen ResNet feature
+cache, then pass that feature manifest here. A warm-start head must match its
+identity mapping and manifest exactly; omit `--head-checkpoint` to prepare a cache
+for standalone training with a random head. `finetune_study` specifically requires
+a matching seed-42 warm-start baseline. A standalone run is also available:
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.run --task-module flower_face.finetune_task --manifest data\digiface-resnet18-layer3\manifest.json --num-classes 100 --num-clients 4 --image-size 224 --rounds 15 --lr 0.001 --compression none --skip-test --output-dir outputs\finetune-single
+```
+
+Use `flower_face.predict_pretrained` with the fine-tuned checkpoint and intermediate
+manifest to predict directly from a cropped image. It reconstructs the frozen
+prefix and trained final stage; the intermediate feature cache is not needed
+for prediction, but the manifest and verified original weights are required.
+
 ## Validate the framework without images
 
 ```powershell

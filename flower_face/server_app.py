@@ -248,7 +248,7 @@ def main(grid: Grid, context: Context):
     result = strategy.start(
         grid=MeasuredGrid(grid, strategy.communication), initial_arrays=ArrayRecord(model.state_dict()),
         train_config=ConfigRecord({"lr": config["learning-rate"]}),
-        num_rounds=config["num-server-rounds"], timeout=120,
+        num_rounds=config["num-server-rounds"], timeout=getattr(task, 'ROUND_TIMEOUT', 120),
     )
     expected_rounds = set(range(1, config["num-server-rounds"] + 1))
     if (set(result.train_metrics_clientapp) != expected_rounds

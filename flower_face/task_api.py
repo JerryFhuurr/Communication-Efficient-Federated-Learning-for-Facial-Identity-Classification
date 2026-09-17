@@ -19,6 +19,9 @@ def resolve(config, **defaults):
     for key in ('Net', 'load_data', 'train', 'test', 'read_manifest'):
         if not callable(getattr(module, key, None)):
             raise ValueError(f'Task {name} is missing {key}')
+    if callable(getattr(module, 'build_model', None)):
+        # Optional configuration-aware initialization (e.g. verified local weights).
+        return SimpleNamespace(**dict(vars(module), Net=lambda classes: module.build_model(config, classes)))
     return module
 
 
