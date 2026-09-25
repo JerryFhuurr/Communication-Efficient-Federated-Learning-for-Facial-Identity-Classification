@@ -1,5 +1,9 @@
 # Source papers and LLZ implementation notes
 
+For the consolidated literature review, research questions, and experimental
+protocol, see [thesis preparation](../docs/thesis/README.md). That preparation
+uses the current results and separates the completed pilot from proposed work.
+
 Both supplied PDFs were read locally on 2026-09-08. Their originals remain in the
 user's paper folder; they are not bundled into the application or copied into Git.
 

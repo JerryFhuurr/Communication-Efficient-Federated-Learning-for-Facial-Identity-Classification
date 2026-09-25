@@ -18,6 +18,10 @@ lossy method. LLZ-SI and Top-k are future research extensions.
 See [FRAMEWORK.md](FRAMEWORK.md) for the task contract, experiment protocol,
 recovery guarantees, reporting semantics, and known limitations.
 
+The [thesis preparation documents](docs/thesis/README.md) contain the consolidated
+literature review, BibTeX references, and experimental design grounded in the
+completed compression results.
+
 ## Project layout
 
 | Path | Purpose |
