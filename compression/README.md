@@ -144,3 +144,56 @@ The original vector occupies 16,384 raw bytes. Relative squared error means
 `||decoded - original||_2**2 / ||original||_2**2`; it is not a classification error
 rate. Results above are a single random draw for each setting. Compression ratios
 describe these codec packets only, not end-to-end communication savings.
+
+## Standalone learned codec (v1)
+
+`autoencoder.py` implements a CPU float32 256 -> 64 -> 6 -> 64 -> 256
+autoencoder, with ReLU hidden layers and linear latent/output layers. It is
+independent of Flower. Training is separate from the packet API:
+
+```python
+from compression.autoencoder import BlockAutoencoder, encode, decode, weight_bytes, load_weights
+
+model = BlockAutoencoder().eval()  # fit first for useful reconstruction
+packet = encode(named_float32_deltas, model)
+decoder_artifact = weight_bytes(model, decoder_only=True)
+server_decoder = load_weights(decoder_artifact, decoder_only=True)
+restored = decode(packet, server_decoder, expected_shapes)
+```
+
+Each tensor is processed independently in sorted name order, normalized using
+the calibration convention, padded to 256 and cropped on decode. Zero-norm
+blocks have zero latents and decode to exact zero even with decoder biases.
+Inference uses chunks of at most 1,024 blocks and requires eval-mode finite CPU
+float32 weights. Gradients and model state are unchanged.
+
+`AEP1` packets contain a 44-byte header (magic, layout byte length, block count,
+32-byte decoder SHA256), canonical ASCII JSON names/shapes, then 28 bytes per
+block: one float32 L2 scale and six float32 latents, little endian. Receivers
+must provide trusted expected shapes; packet metadata cannot choose allocation
+sizes. Wrong versions, layouts, lengths, decoder identities, negative/nonfinite
+scales, nonfinite latents and noncanonical zero blocks are rejected. There is
+no latent quantization or entropy coding. The codec is lossy even though its
+latent serialization is float32.
+
+`AEW1` weight artifacts use a five-byte version/role header, fixed architecture
+weight order, float32 weights and a 32-byte SHA256 checksum, without pickle.
+Use `weight_bytes(model)` for an encoder+decoder checkpoint and
+`load_weights(bytes)` to restore it. Optimizer state is not stored; this is not
+a resumable training checkpoint. A decoder-only artifact is **68,389 bytes per
+client**; count all four artifacts plus calibration/fitting costs when assessing
+setup overhead. SHA256 identifies contents, not the sender's authenticity.
+
+To check one existing calibration update without training:
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests/test_autoencoder.py -q
+.venv\Scripts\python.exe -m compression.check_autoencoder --collection outputs/ae-calibration-20261005T122126176771Z
+```
+
+The smoke command uses untrained weights and saves its report under ignored
+`outputs/ae-codec-*`. It demonstrates interface correctness only. Fitting and
+held-out reconstruction comparisons remain separate scheduled batches.
+This implementation adapts the client-encoder/server-decoder idea from
+[Chandar et al. (2021)](https://arxiv.org/abs/2108.05670); it is not a reproduction
+of that paper's model or compression-ratio claims.
