@@ -197,3 +197,33 @@ held-out reconstruction comparisons remain separate scheduled batches.
 This implementation adapts the client-encoder/server-decoder idea from
 [Chandar et al. (2021)](https://arxiv.org/abs/2108.05670); it is not a reproduction
 of that paper's model or compression-ratio claims.
+
+### Fixed offline fitting and comparison batch
+
+```powershell
+.venv\Scripts\python.exe -m compression.fit_autoencoder --collection outputs/ae-calibration-20261005T122126176771Z
+.venv\Scripts\python.exe -m compression.report_autoencoder outputs/ae-feasibility-<timestamp>
+```
+
+The fitting command runs the agreed four-client batch: ten epochs, Adam 0.001,
+batch 1,024, compressor seed 4242 + client ID, no architecture search. It uses
+population-weighted squared errors on normalized blocks, masks padding, and
+selects the minimum sampled reconstruction-validation loss. Zero norms follow
+the codec's exact-zero bypass. Each full held-out update is then probed with AE,
+per-tensor QSGD at 127 levels, and global Top-k at k=124,000 without feedback.
+No Flower training or identity accuracy evaluation is launched.
+
+The result directory records full/decoder weight artifacts, per-epoch history,
+per-update/per-tensor errors, actual bundle bytes, seeds, hashes and timings.
+Pass `--output outputs/ae-feasibility-<timestamp>` to reuse a compatible result
+directory; completed client fits/probes can be reused after an interruption.
+Source/configuration/environment or artifact mismatches fail closed. The report
+command checks saved artifacts and creates a report/plot without training.
+Reconstruction-validation updates also select checkpoints; they are a development
+set, not an untouched test set. They share training images with fitting updates.
+
+Keep the numerical report separate from the final `decision.md` and weekly
+summary in the result directory. A byte saving alone does not justify Flower
+integration: consider reconstruction error/direction, setup, CPU cost and
+later-round update drift. The feasibility batch ends at the proceed/stop review;
+architecture changes and FL confirmation require a separately agreed batch.
