@@ -9,6 +9,23 @@ import math
 import torch
 
 
+def fixed_state_keys(task, model):
+    """Only explicitly declared buffers may be held immutable across clients."""
+    policy = getattr(task, 'fixed_state_names', None)
+    names = set(policy(model)) if callable(policy) else set()
+    if not names <= set(dict(model.named_buffers())):
+        raise ValueError('Fixed state policy must name registered buffers, never trainable parameters')
+    return names
+
+
+def verify_fixed_state(state, reference):
+    for name, expected in reference.items():
+        actual = state.get(name)
+        if (actual is None or actual.dtype != expected.dtype or actual.shape != expected.shape
+                or not torch.equal(actual.detach().cpu(), expected.detach().cpu())):
+            raise ValueError(f'Fixed buffer changed: {name}')
+
+
 def resolve(config, **defaults):
     name = config.get('task-module', 'flower_face.task')
     if not isinstance(name, str) or not name.startswith('flower_face.'):
@@ -34,6 +51,8 @@ def validate(config):
     if isinstance(lr, bool) or not isinstance(lr, (float,int)) or not math.isfinite(lr) or lr <= 0:
         raise ValueError('learning-rate must be finite and positive')
     task = resolve(config)
+    if (config.get('initial-checkpoint') or config.get('initial-checkpoint-sha256')) and config.get('task-module') != 'flower_face.finetune_task':
+        raise ValueError('initial-checkpoint is supported by flower_face.finetune_task only')
     validate_config = getattr(task, 'validate_config', None)
     if validate_config is not None:
         if not callable(validate_config):
@@ -41,11 +60,16 @@ def validate(config):
         validate_config(config)
     task.read_manifest(config['manifest'], config['num-classes'], config['num-clients'])
     model = task.Net(config['num-classes'])
+    fixed = fixed_state_keys(task, model)
     if config.get('compression','none') != 'none':
         for name, value in model.state_dict().items():
-            if value.dtype not in (torch.float32, torch.float64):
+            if name not in fixed and value.dtype not in (torch.float32, torch.float64):
                 raise ValueError(f'Compressed task requires float32/64 state tensors: {name}. '
                                  'Integer buffers need an explicit aggregation policy.')
+    if config.get('compression') == 'topk-ef':
+        from federated_compression.topk import metadata
+        metadata({k:v for k,v in model.state_dict().items() if k not in fixed},
+                 config.get('topk-k',124000),1)
     for split in ('train','validation'):
         for client in range(config['num-clients']):
             loader = task.load_data(config, client, split)

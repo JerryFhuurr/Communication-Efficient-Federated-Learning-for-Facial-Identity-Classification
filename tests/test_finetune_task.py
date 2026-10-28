@@ -74,11 +74,41 @@ def test_factory_initializes_pretrained_tail_and_loader_is_split_safe(config, mo
         task.load_data(config)
 
 
-def test_pilot_rejects_compressed_bn_and_wrong_preprocessing():
-    with pytest.raises(ValueError,match='uncompressed'):
-        task.validate_config({'image-size':224,'compression':'qsgd'})
+def test_compression_uses_fixed_bn_policy_and_rejects_wrong_preprocessing():
+    from flower_face.task_api import fixed_state_keys
+    task.validate_config({'image-size':224,'compression':'qsgd'})
+    model=task.Net(2)
+    fixed=fixed_state_keys(task,model)
+    assert len(fixed)==15
+    assert all(k in fixed or v.is_floating_point() for k,v in model.state_dict().items())
+    assert all(k not in fixed for k,_ in model.named_parameters())
     with pytest.raises(ValueError,match='224'):
         task.validate_config({'image-size':64})
+
+
+def test_continuation_restores_both_tail_and_head_and_rejects_wrong_provenance(config):
+    directory = Path(config['manifest']).parent
+    model = task.Net(2)
+    with torch.no_grad():
+        model.layer4[0].conv1.weight.fill_(0.125)
+        model.classifier.weight.fill_(0.25)
+    saved = dict(state_dict=model.state_dict(),identities=['0','1'],config=config,
+                 manifest_sha256=task.file_hash(config['manifest']))
+    checkpoint = directory/'initial.pt'
+    torch.save(saved,checkpoint)
+    cfg=dict(config,**{'initial-checkpoint':str(checkpoint),'initial-checkpoint-sha256':task.file_hash(checkpoint)})
+    restored=resolve(cfg).Net(2)
+    assert all(torch.equal(v,restored.state_dict()[k]) for k,v in model.state_dict().items())
+    saved['manifest_sha256']='wrong'
+    torch.save(saved,checkpoint)
+    cfg['initial-checkpoint-sha256']=task.file_hash(checkpoint)
+    with pytest.raises(ValueError,match='must match'):
+        resolve(cfg).Net(2)
+    cfg['initial-checkpoint-sha256']='incorrect'
+    with pytest.raises(ValueError,match='checksum'):
+        resolve(cfg).Net(2)
+    with pytest.raises(ValueError,match='both a path and checksum'):
+        task.validate_config(dict(config,**{'initial-checkpoint':str(checkpoint)}))
 
 
 @pytest.mark.parametrize('module', ['flower_face.pretrained_task', 'flower_face.pretrained_mlp_task',

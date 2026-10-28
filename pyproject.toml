@@ -32,12 +32,16 @@ clientapp = "flower_face.client_app:app"
 
 [tool.flwr.app.config]
 task-module = "flower_face.task"
+initial-checkpoint = ""
+initial-checkpoint-sha256 = ""
 num-server-rounds = 3
 evaluate-final-test = false
 compression = "none"
+topk-k = 124000
 qsgd-levels = 127
 llz-p = 0
 llz-window = 128
+llz-budget = 0.0
 num-clients = 4
 num-classes = 10
 local-epochs = 1

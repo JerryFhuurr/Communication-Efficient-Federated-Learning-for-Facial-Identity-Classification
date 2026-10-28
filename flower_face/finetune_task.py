@@ -17,6 +17,13 @@ from flower_face.task import validate_augmentation, validate_weight_decay
 ROUND_TIMEOUT = 900
 
 
+def fixed_state_names(model):
+    """BN affine parameters train; running statistics and counters stay fixed."""
+    return {f'{name}.{key}' for name, module in model.named_modules()
+            if isinstance(module, nn.BatchNorm2d)
+            for key in ('running_mean', 'running_var', 'num_batches_tracked')}
+
+
 def file_hash(path):
     with Path(path).open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
@@ -77,6 +84,15 @@ def build_model(config, classes):
     manifest = read_manifest(config['manifest'], classes, config['num-clients'])
     directory = Path(config['manifest']).resolve().parent
     model = Net(classes)
+    if config.get('initial-checkpoint'):
+        path = verify(config['initial-checkpoint'], config['initial-checkpoint-sha256'])
+        saved = torch.load(path, map_location='cpu', weights_only=True)
+        if (saved['manifest_sha256'] != file_hash(config['manifest'])
+                or saved['identities'] != manifest['identities']
+                or saved['config']['task-module'] != 'flower_face.finetune_task'):
+            raise ValueError('Initial checkpoint must match this fine-tuning task and manifest')
+        model.load_state_dict(saved['state_dict'])
+        return model
     state = torch.load(directory / manifest['feature_extractor']['weights_file'],
                        map_location='cpu', weights_only=True)
     model.layer4.load_state_dict({k.removeprefix('layer4.'): v for k, v in state.items()
@@ -96,8 +112,9 @@ def validate_config(config):
     validate_weight_decay(config.get('weight-decay', 0.0))
     if config['image-size'] != 224:
         raise ValueError('Intermediate features require 224px preprocessing')
-    if config.get('compression', 'none') != 'none':
-        raise ValueError('Fine-tuning pilot supports uncompressed training only; BN buffer compression needs a policy')
+    path, digest = config.get('initial-checkpoint', ''), config.get('initial-checkpoint-sha256', '')
+    if bool(path) != bool(digest):
+        raise ValueError('Initial checkpoint requires both a path and checksum')
 
 
 def load_data(config, client_id=None, split='train', seed=None, *, apply_augmentation=True):
@@ -115,7 +132,7 @@ def load_data(config, client_id=None, split='train', seed=None, *, apply_augment
                       generator=torch.Generator().manual_seed(config['seed'] if seed is None else seed))
 
 
-def train(model, loader, epochs, lr, device='cpu', *, weight_decay=0.0):
+def train(model, loader, epochs, lr, device='cpu', *, weight_decay=0.0, on_batch=None):
     if epochs < 1 or lr <= 0:
         raise ValueError('epochs and learning rate must be positive')
     model.to(device).train()
@@ -124,6 +141,7 @@ def train(model, loader, epochs, lr, device='cpu', *, weight_decay=0.0):
         {'params': model.classifier.parameters(), 'lr': 10 * lr},
     ], weight_decay=validate_weight_decay(weight_decay))
     total, count = 0.0, 0
+    step = 0
     for _ in range(epochs):
         for inputs, labels in loader:
             inputs, labels = inputs.to(device), labels.to(device)
@@ -131,6 +149,9 @@ def train(model, loader, epochs, lr, device='cpu', *, weight_decay=0.0):
             loss = nn.functional.cross_entropy(model(inputs), labels)
             loss.backward()
             optimizer.step()
+            step += 1
+            if on_batch is not None:
+                on_batch(step, model)
             total += loss.item() * len(labels)
             count += len(labels)
     return total / count

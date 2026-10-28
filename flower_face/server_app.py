@@ -2,6 +2,8 @@
 
 from copy import copy
 import math
+import json
+from time import perf_counter
 
 from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord, RecordDict
 from flwr.serverapp import Grid, ServerApp
@@ -9,9 +11,9 @@ from flwr.serverapp.strategy import FedAvg
 import torch
 
 from flower_face.experiment import Experiment
-from flower_face.communication import CommunicationLedger, MeasuredGrid
+from flower_face.communication import CommunicationLedger, MeasuredGrid, measure_message
 from flower_face.task import Net, load_data, read_manifest, seed_everything, test
-from flower_face.task_api import resolve
+from flower_face.task_api import resolve, fixed_state_keys, verify_fixed_state
 from federated_compression import CODECS, compression_settings, decode_update, llz_settings
 from flower_face.reproducibility import model_hash
 
@@ -107,7 +109,7 @@ def aggregate_llz_distortion(replies, p):
 class CheckpointFedAvg(FedAvg):
     """Keep Flower's aggregation; record the model matching each validation round."""
 
-    def __init__(self, experiment, clients):
+    def __init__(self, experiment, clients, *, fixed_state=None):
         super().__init__(fraction_train=1.0, fraction_evaluate=1.0,
                          min_train_nodes=clients, min_evaluate_nodes=clients,
                          min_available_nodes=clients)
@@ -116,6 +118,7 @@ class CheckpointFedAvg(FedAvg):
         self.current = None
         self.node_partitions = {}
         self.communication = CommunicationLedger(experiment)
+        self.fixed_state = {k:v.detach().cpu().clone() for k,v in (fixed_state or {}).items()}
 
     def checked_replies(self, replies):
         replies = list(replies)
@@ -139,9 +142,17 @@ class CheckpointFedAvg(FedAvg):
         return [reply for _, reply in sorted(zip(partitions, replies), key=lambda item: item[0])]
 
     def aggregate_train(self, server_round, replies):
-        arrays, metrics = super().aggregate_train(server_round, self.checked_replies(replies))
+        replies = self.checked_replies(replies)
+        if self.fixed_state:
+            for reply in replies:
+                verify_fixed_state(reply.content['arrays'].to_torch_state_dict(), self.fixed_state)
+        arrays, metrics = super().aggregate_train(server_round, replies)
         if arrays is None or metrics is None:
             raise RuntimeError("Training aggregation returned no model or metrics.")
+        if self.fixed_state:
+            state = arrays.to_torch_state_dict()
+            state.update({k:v.clone() for k,v in self.fixed_state.items()})
+            arrays = ArrayRecord(state)
         self.current = (server_round, arrays, dict(metrics))
         return arrays, metrics
 
@@ -152,7 +163,13 @@ class CheckpointFedAvg(FedAvg):
         _, arrays, train_metrics = self.current
         improved = self.experiment.consider_best(
             arrays.to_torch_state_dict(), server_round, metrics["eval_loss"], metrics["eval_acc"])
-        self.experiment.log_step(dict(round=server_round, train=train_metrics,
+        timing = {}
+        if getattr(self, 'method', None) == 'topk-ef':
+            now=perf_counter()
+            timing=dict(round_seconds=now-self.round_started,
+                        training_phase_seconds=self.train_finished-self.round_started,
+                        validation_phase_seconds=now-self.train_finished)
+        self.experiment.log_step(dict(timing=timing, round=server_round, train=train_metrics,
                                       validation=dict(metrics), train_clients=self.clients,
                                       validation_clients=self.clients, new_best=improved,
                                       model_sha256=model_hash(arrays.to_torch_state_dict()),
@@ -167,11 +184,15 @@ class CheckpointFedAvg(FedAvg):
 class QSGDFedAvg(CheckpointFedAvg):
     """Decode client deltas, average with FedAvg weights, then add to round base."""
 
-    def __init__(self, experiment, clients, levels, *, method="qsgd", llz_p=0, llz_window=128):
+    def __init__(self, experiment, clients, levels, *, method="qsgd", llz_p=0, llz_window=128, fixed_state=None, topk_k=124000, llz_budget=0.0):
+        # Delta aggregation contains no fixed buffers. Restore them after averaging.
         super().__init__(experiment, clients)
+        self.fixed_reference = {k:v.detach().cpu().clone() for k,v in (fixed_state or {}).items()}
         self.levels = levels
+        self.topk_k = topk_k
+        self.llz_budget = llz_budget
         compression_settings({"compression": method, "qsgd-levels": levels,
-                              "llz-p": llz_p, "llz-window": llz_window})
+                              "llz-p": llz_p, "llz-window": llz_window, "llz-budget": llz_budget})
         if method not in CODECS:
             raise ValueError("Delta strategy requires a QSGD method")
         self.method, self.llz_p, self.llz_window = method, llz_p, llz_window
@@ -179,7 +200,11 @@ class QSGDFedAvg(CheckpointFedAvg):
         self.reference_round = None
 
     def configure_train(self, server_round, arrays, config, grid):
-        self.reference = {k: v.clone() for k, v in arrays.to_torch_state_dict().items()}
+        if self.method == "topk-ef":
+            self.round_started = perf_counter()
+        state = arrays.to_torch_state_dict()
+        verify_fixed_state(state, self.fixed_reference)
+        self.reference = {k: v.clone() for k, v in state.items() if k not in self.fixed_reference}
         self.reference_round = server_round
         return super().configure_train(server_round, arrays, config, grid)
 
@@ -187,13 +212,38 @@ class QSGDFedAvg(CheckpointFedAvg):
         replies = self.checked_replies(replies)
         if self.reference is None or self.reference_round != server_round:
             raise RuntimeError("QSGD aggregation has no matching round reference")
-        distortion = aggregate_qsgd_distortion(replies)
+        distortion = {} if self.method == "topk-ef" else aggregate_qsgd_distortion(replies)
+        timing_rows = []
+        adaptive_rows = []
         if self.method == "qsgd-llz":
             distortion.update(aggregate_llz_distortion(replies, self.llz_p))
         decoded_replies = []
         for reply in replies:
-            delta = decode_update(reply.content, self.reference, levels=self.levels, server_round=server_round,
-                                  method=self.method, llz_p=self.llz_p, llz_window=self.llz_window)
+            if self.method == "topk-ef":
+                from federated_compression.topk import decode
+                started = perf_counter()
+                delta = decode(reply.content, self.reference, k=self.topk_k, server_round=server_round)
+                decode_seconds = perf_counter()-started
+                observed = {key: value for key,value in reply.content['metrics'].items() if key.startswith('topk_')}
+                required = {'topk_encode_seconds','topk_diagnostic_seconds','topk_corrected_squared_norm',
+                            'topk_residual_squared_norm','topk_delta_squared_norm','topk_transmitted_vs_delta_squared_error'}
+                if set(observed)!=required or any(type(v) not in (float,int) or not math.isfinite(v) or v<0 for v in observed.values()):
+                    raise ValueError('Invalid Top-k diagnostic/timing metrics')
+                timing_rows.append(dict(round=server_round, client=reply.content['client']['partition-id'],
+                                        decode_seconds=decode_seconds, **observed))
+            elif self.method == 'qsgd-llz-adaptive':
+                from federated_compression.adaptive_llz import decode
+                started = perf_counter()
+                delta = decode(reply.content, self.reference, levels=self.levels,
+                    server_round=server_round, budget=self.llz_budget, window=self.llz_window)
+                adaptive_rows.append(dict(round=server_round,
+                    client=reply.content['client']['partition-id'],
+                    decode_seconds=perf_counter()-started,
+                    observed_message_bytes=measure_message(reply)['serialized_object_bytes'],
+                    **dict(reply.content['metrics'])))
+            else:
+                delta = decode_update(reply.content, self.reference, levels=self.levels, server_round=server_round,
+                                      method=self.method, llz_p=self.llz_p, llz_window=self.llz_window)
             # Grid has already logged the actual encoded message. These local
             # copies are used only to reuse Flower's sample-weighted aggregation.
             decoded = copy(reply)
@@ -207,10 +257,29 @@ class QSGDFedAvg(CheckpointFedAvg):
         average_delta, metrics = super().aggregate_train(server_round, decoded_replies)
         delta_state = average_delta.to_torch_state_dict()
         state = {name: base + delta_state[name] for name, base in self.reference.items()}
+        state.update({k:v.clone() for k,v in self.fixed_reference.items()})
         if any(not torch.isfinite(value).all() for value in state.values()):
             raise ValueError("QSGD aggregation produced nonfinite weights")
         arrays = ArrayRecord(state)
         metrics.update(distortion)
+        if self.method == 'qsgd-llz-adaptive':
+            distortion = aggregate_llz_distortion(replies, p=2)
+            distortion.pop('llz_p')  # Each client can choose a different p.
+            metrics.update(distortion)
+            for p in (0, 1, 2):
+                metrics[f'adaptive_p{p}_clients'] = sum(row['adaptive_selected_p']==p for row in adaptive_rows)
+            norm = sum(row['qsgd_input_squared_norm'] for row in adaptive_rows)
+            extra = sum(row['llz_reconstruction_squared_error'] for row in adaptive_rows)
+            metrics['adaptive_extra_relative_squared_error'] = extra/norm if norm else 0.0
+            metrics['adaptive_selection_seconds_sum'] = sum(row['adaptive_selection_seconds'] for row in adaptive_rows)
+            with (self.experiment.output/'adaptive_selection.jsonl').open('a',encoding='utf-8') as stream:
+                for row in adaptive_rows:
+                    stream.write(json.dumps(row,allow_nan=False)+'\n')
+        if self.method == 'topk-ef':
+            with (self.experiment.output/'codec_timing.jsonl').open('a',encoding='utf-8') as stream:
+                for row in timing_rows:
+                    stream.write(json.dumps(row,allow_nan=False)+'\n')
+            self.train_finished = perf_counter()
         self.current = (server_round, arrays, dict(metrics))
         return arrays, metrics
 
@@ -221,30 +290,62 @@ def main(grid: Grid, context: Context):
     method, levels = compression_settings(config)
     config.update({"compression": method, "qsgd-levels": levels})
     p, window = llz_settings(config, levels=levels) if method == "qsgd-llz" else (0, 128)
+    budget = 0.0
+    if method == 'qsgd-llz-adaptive':
+        from federated_compression.adaptive_llz import settings
+        budget, window = settings(config, levels=levels)
+        config.update({'llz-budget': budget, 'llz-window': window})
     if method == "qsgd-llz":
         config.update({"llz-p": p, "llz-window": window})
     task = resolve(config, Net=Net, load_data=load_data, read_manifest=read_manifest, test=test)
     manifest = task.read_manifest(config["manifest"], config["num-classes"], config["num-clients"])
     seed_everything(config["seed"])
     model = task.Net(config["num-classes"])
+    fixed_keys = fixed_state_keys(task, model)
+    fixed_state = {k:v for k,v in model.state_dict().items() if k in fixed_keys}
     experiment = Experiment(config["output-dir"], "fedavg-"+method if method != "none" else "fedavg", config, manifest, "round")
     experiment.metadata["initial_model_sha256"] = model_hash(model.state_dict())
+    experiment.metadata['fixed_state_policy'] = dict(
+        policy='immutable server-initial buffers', names=sorted(fixed_keys),
+        upload='full buffers with uncompressed models; omitted from compressed deltas',
+        downlink='included in every full-state download')
     experiment.metadata["compression"] = dict(
         method=method, codec=CODECS.get(method),
         target="client model deltas" if method != "none" else "full client models",
-        normalization="one L2 norm per tensor" if method != "none" else None,
+        normalization="one L2 norm per tensor" if method in ("qsgd","qsgd-llz","qsgd-llz-adaptive") else None,
         llz_p=p if method == "qsgd-llz" else None,
-        llz_window=window if method == "qsgd-llz" else None,
+        llz_window=window if method in ("qsgd-llz", "qsgd-llz-adaptive") else None,
         qsgd_distortion=("summed over all client tensor coordinates relative to the "
-                         "original full-precision model deltas; reported in aggregated train metrics"
-                         if method != "none" else None),
+                         "original full-precision non-fixed model deltas; reported in aggregated train metrics"
+                         if method in ("qsgd","qsgd-llz","qsgd-llz-adaptive") else None),
         llz_distortion=("summed over all client tensor coordinates relative to the "
                         "dequantized QSGD updates; reported in aggregated train metrics"
-                        if method == "qsgd-llz" else None),
-        downlink="uncompressed", error_feedback=False,
-        rng="SeedSequence([seed, round, partition_id, 0x51534744]); sorted tensor names" if method != "none" else None)
-    strategy = (QSGDFedAvg(experiment, config["num-clients"], levels, method=method, llz_p=p, llz_window=window) if method != "none"
-                else CheckpointFedAvg(experiment, config["num-clients"]))
+                        if method in ("qsgd-llz", "qsgd-llz-adaptive") else None),
+        downlink="uncompressed", error_feedback=method == "topk-ef",
+        rng="SeedSequence([seed, round, partition_id, 0x51534744]); sorted tensor names" if method in ("qsgd","qsgd-llz","qsgd-llz-adaptive") else None)
+    if method == 'qsgd-llz-adaptive':
+        experiment.metadata['compression']['adaptive'] = dict(
+            candidates=[0,1,2], budget=budget, scope='one p per whole client update',
+            constraint='sum(||decode(LLZ(QSGD(u)))-decode(QSGD(u))||^2) / sum(||u||^2) <= budget; zero norm requires zero error',
+            objective='minimum serialized reply object graph bytes, including diagnostics; lower p breaks ties',
+            fallback='p=0; fail on codec error rather than relax budget',
+            diagnostics='adaptive_selection.jsonl; preflight client bytes and observed server bytes separately',
+            error_feedback=False)
+    if method == "topk-ef":
+        experiment.metadata["compression"].update(topk_k=config.get("topk-k",124000),
+            selection="global magnitude; ascending index breaks ties",
+            residual="float32 per client in Context.state; sequential rounds required; no model-only resume")
+        experiment.metadata["timing"] = dict(
+            client_encode="layout validation, delta, residual, selection, pack, local decode and state persistence",
+            diagnostic="squared-norm calculations separately timed",
+            server_decode="validation, unpack and tensor conversion, excluding aggregation",
+            round="configure_train through validation/checkpoint selection; excludes history writing",
+            warmup="none excluded; report first round separately",
+            limitation="CPU simulation wall times; no network latency or historical codec speed comparison")
+    strategy = (QSGDFedAvg(experiment, config["num-clients"], levels, method=method, llz_p=p,
+                          llz_window=window, fixed_state=fixed_state, topk_k=config.get("topk-k",124000),
+                          llz_budget=budget) if method != "none"
+                else CheckpointFedAvg(experiment, config["num-clients"], fixed_state=fixed_state))
     result = strategy.start(
         grid=MeasuredGrid(grid, strategy.communication), initial_arrays=ArrayRecord(model.state_dict()),
         train_config=ConfigRecord({"lr": config["learning-rate"]}),

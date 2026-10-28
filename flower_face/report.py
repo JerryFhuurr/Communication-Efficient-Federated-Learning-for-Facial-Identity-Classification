@@ -14,6 +14,7 @@ def generate(directory):
     if record['status'] != 'completed':
         raise ValueError('Reporting requires a completed study')
     protocol = record['protocol']
+    single_seed = len(protocol['seeds']) == 1
     runs = _verify_completed_runs(record, protocol)
     summary = summarize(runs, protocol['seeds'], protocol['llz_p_values'])
     output = directory/'report'
@@ -41,7 +42,9 @@ def generate(directory):
             writer.writeheader()
             writer.writerows(values)
     lines = ['# Compression study report', '', summary['measurement'], '',
-             'Values are means across seeds. MB uses 1,000,000 bytes. Selected checkpoints minimize validation loss.', '',
+             ('Values are from one seed; no between-seed uncertainty is estimated. ' if single_seed
+              else 'Values are means across seeds. ') +
+             'MB uses 1,000,000 bytes. Selected checkpoints minimize validation loss.', '',
              '| Method | Selected accuracy | Selected loss | Upload MB | Total MB |',
              '|---|---:|---:|---:|---:|']
     for method, result in summary['methods'].items():
@@ -50,7 +53,7 @@ def generate(directory):
                      f"{result['training_upload_bytes']['mean']/1e6:.3f} | "
                      f"{result['total_serialized_bytes']['mean']/1e6:.3f} |")
     lines += ['', 'Distortion curves average per-round ratios across seeds. QSGD and LLZ use different reference norms; their ratios must not be added.',
-              'Positive-p runs follow different model trajectories. Thirty rounds on a small validation split do not establish converged or statistically equivalent accuracy.',
+              'Positive-p runs follow different model trajectories. A finite study on a small validation split does not establish converged or statistically equivalent accuracy.',
               '', 'Test data unused. CSV files contain per-seed values. All study artifacts were reconciled before export.']
     (output/'report.md').write_text('\n'.join(lines)+'\n', encoding='utf-8')
     import matplotlib
@@ -72,7 +75,9 @@ def generate(directory):
             sd = [statistics.stdev(p[ykey] for p in group) if len(group)>1 else 0 for group in groups]
             ax.plot(xs, ys, label=method, linestyle='--' if method.endswith('p0') else '-')
             ax.fill_between(xs, [y-s for y,s in zip(ys,sd)], [y+s for y,s in zip(ys,sd)], alpha=.1)
-        ax.set(xlabel=xkey.replace('_',' '), ylabel=ykey.replace('_',' '), title='Mean across seeds; shading = sample SD')
+        title = (f"Seed {protocol['seeds'][0]}; single-seed pilot" if single_seed
+                 else 'Mean across seeds; shading = sample SD')
+        ax.set(xlabel=xkey.replace('_',' '), ylabel=ykey.replace('_',' '), title=title)
         ax.legend(fontsize=8); ax.grid(alpha=.2)
         for ext in ('png','svg'):
             fig.savefig(output/f'{name}.{ext}', dpi=150)

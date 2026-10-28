@@ -1,5 +1,12 @@
 # Standalone QSGD and LLZ-p codecs
 
+`adaptive_llz.select(updates, levels=..., rng=..., budget=..., window_size=128)`
+now tries p=0/1/2 on one shared QSGD draw per tensor and selects one p for the
+whole update. Its constraint is additional decoded LLZ squared error divided
+by original-update squared norm. It counts packet bytes by default; a caller
+can supply a complete-message cost callback without introducing a Flower
+dependency. See the [precise contract](../docs/thesis/adaptive-llz-contract.md).
+
 This package requires NumPy and Python's standard library. It imports neither
 Flower nor PyTorch. It implements `qsgd-l2-dense-v1`, `llz-p-fixed-v1`, and the
 composed `qsgd-llz-p-v1` packet. The separate
@@ -145,6 +152,108 @@ The original vector occupies 16,384 raw bytes. Relative squared error means
 rate. Results above are a single random draw for each setting. Compression ratios
 describe these codec packets only, not end-to-end communication savings.
 
+
+## Global Top-k with client error feedback
+
+`compression.topk` is a NumPy-only float32 vector codec, separate from QSGD's
+symbol registry. It retains exactly k coordinates by descending magnitude;
+ascending flattened index resolves ties. Packet indices are stored in ascending
+order. `TPK1` framing is little endian: magic (4 bytes), vector length (uint32),
+k (uint32), k uint32 indices, then k float32 values: exactly `12 + 8*k` bytes.
+Decoding requires the expected length/k and rejects malformed, duplicate,
+out-of-range, nonfinite, truncated, or trailing data. Zero vectors still retain
+k entries; this baseline has no variable-length zero shortcut.
+
+`federated_compression.topk` sorts tensor names, fingerprints names/shapes/dtypes,
+and compresses the concatenated trainable delta globally. Fixed BatchNorm buffers
+remain outside compression. Per-client float32 residuals live in Flower
+`Context.state`: corrected = delta + residual; next residual = corrected minus
+the decoded packet. State binds to run, partition, layout, k, and preceding round.
+Missing/stale state fails closed. No model-only resume or same-round retry is
+supported: restart an interrupted experiment as a new run from round one.
+Residuals are local algorithm state, not application upload payloads; simulation
+runtime transport of Context state is outside our logical-message ledger.
+
+The new method is `--compression topk-ef --topk-k 124000`. It uses feedback while
+the existing QSGD/LLZ pilot does not. It is a method-level comparison, not an
+isolated sparsifier ablation or an STC reproduction. The implementation adapts
+[Sparsified SGD with Memory](https://arxiv.org/abs/1809.07599) and
+[error feedback](https://proceedings.mlr.press/v97/karimireddy19a.html) to FedAvg
+model deltas; their convergence claims are not automatically inherited.
+
+Run the agreed single seed-42, 15-round comparison against the saved study:
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.check_topk --baseline outputs/finetune-compression-seed42/compression-study-20260925T091315807360Z
+```
+
+The runner saves a source snapshot, configuration, provenance checks, terminal
+log, model checkpoints, comparison table, accuracy plot, and timings under
+`outputs/topk-ef-<timestamp>/`. It never launches historical baselines again.
+An incompatible baseline stops the comparison instead of silently pooling it.
+Do not use this command just to inspect existing results: it starts training.
+
+Client encode timing includes delta creation, validation, residual addition,
+selection, packing, local decoding, and state persistence. Diagnostic norms are
+separately timed. Server decode includes packet checks and tensor conversion,
+not aggregation. Round timing spans training configuration through validation
+and checkpoint selection, including simulation scheduling. All rounds are kept;
+first-round timings are listed separately. These CPU wall times exclude any
+claim of a measured physical-network speedup. Historical baselines have no
+matched codec timing. Per-client timing metrics add counted message bytes.
+
+To regenerate an existing Top-k report without launching training:
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.check_topk --report-only outputs/topk-ef-20260930T113916818351Z
+```
+
+Report-only mode can present OS differences explicitly as historical context;
+it still rejects changes to initialization, data, library versions, training
+settings, or fixed-buffer policy. It never claims an environment match when
+one is absent. Scientific interpretation is kept separately in discussion.md and preserved on
+report regeneration. A new training run checks the OS before launching; an
+explicit --allow-platform-difference is required to use older OS references as
+historical context. It does not make the environments equivalent.
+
+
+## Learned-codec calibration data
+
+The reproducible collector uses the existing DigiFace layer3 feature cache and
+fine-tuning initialization. It gathers four clients x two reset one-epoch local
+trajectories on training images only. Fitting and reconstruction-validation
+trajectories share the image population but have independent recorded seeds;
+this is trajectory separation, not an unseen-image or unseen-client evaluation.
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.collect_ae_updates
+```
+
+This command performs calibration training. It reuses a compatible, hash-verified
+completed collection when available. Otherwise it saves a source snapshot and
+at most ten cumulative deltas per trajectory under `outputs/ae-calibration-*`.
+Fitting stores up to 32,768 sampled normalized 256-value blocks per client;
+validation stores up to 8,192 sampled blocks plus full held-out deltas. The data
+size is about 1.52 GB for this model. Each tensor is blocked/padded independently.
+Saved scales, valid lengths, sorted tensor IDs, block indices, snapshot steps,
+and population weights preserve the sampling convention and lineage.
+
+Normalization uses float64 norm accumulation and finite float32 scales. Zero
+blocks remain exactly zero. Stratified sampling covers every tensor/snapshot,
+then allocates approximately in proportion to block population. Weighted losses
+can recover the uniform full-block population; coordinate-weighted or masked
+losses must separately account for partial padding. Do not treat padded entries
+as additional original coordinates.
+
+The optional `on_batch` observer in `finetune_task.train` captures state after
+SGD steps; affected tests verify that read-only observation preserves training.
+Collection records preparation, training, snapshot processing, file writing,
+and concurrent wall time separately. Calibration is additional work, excluded
+from the previous FL runs. There is no Flower traffic measurement in this job.
+The collector does not train an autoencoder or evaluate identity validation/test
+labels. The full deltas are simulation artifacts for offline codec checks, not a
+claim that a deployed server can access private client updates freely.
+
 ## Standalone learned codec (v1)
 
 `autoencoder.py` implements a CPU float32 256 -> 64 -> 6 -> 64 -> 256
@@ -227,3 +336,33 @@ summary in the result directory. A byte saving alone does not justify Flower
 integration: consider reconstruction error/direction, setup, CPU cost and
 later-round update drift. The feasibility batch ends at the proceed/stop review;
 architecture changes and FL confirmation require a separately agreed batch.
+
+### Matched QSGD/LLZ screening batch
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.check_compression
+# Resume a specific interrupted batch without rerunning completed methods:
+.venv\Scripts\python.exe -m flower_face.check_compression --resume outputs/llz-matched-<timestamp>
+```
+
+This runner executes only QSGD and QSGD+LLZ at p=0 and p=1: seed 42,
+15 rounds, four clients, levels 127, window 128, existing fine-tuning data/model
+settings and no feedback. It freezes current source, requires exact p=0 learning
+replay, and reports p=1 accuracy/loss versus logical communication cost.
+Full-launch wall times include Flower startup/simulation/training/validation;
+they are not isolated codec measurements. Outputs, logs and plots are saved
+under ignored `outputs/llz-matched-*`. No additional baseline or seed is run.
+
+To extend the completed batch with exactly the two remaining controls:
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.complete_comparison --baseline outputs/llz-matched-20261010T114122936542Z
+# Reuse completed controls after an interruption:
+.venv\Scripts\python.exe -m flower_face.complete_comparison --resume outputs/compression-controls-<timestamp>
+```
+
+This reuses the three completed QSGD/LLZ runs and their frozen app, checks current
+environment compatibility before training, then runs uncompressed and Top-k+EF
+controls with the original settings. The five-method report marks feedback
+differences and timing limitations across execution dates. No optimizer, seed,
+dataset or budget sweep is added. Results stay under `outputs/`.

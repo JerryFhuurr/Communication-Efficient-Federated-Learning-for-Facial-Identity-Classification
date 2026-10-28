@@ -30,17 +30,21 @@ def main():
     parser.add_argument('--num-classes', type=int)
     parser.add_argument('--num-clients', type=int)
     parser.add_argument('--image-size', type=int, help='Input image size owned by the selected task')
+    parser.add_argument('--initial-checkpoint', type=Path, help='Verified starting state for the fine-tuning task')
     parser.add_argument("--seed", type=int, help="Training/codec seed; keeps the manifest and data split fixed")
     parser.add_argument("--lr", type=float, help="SGD learning rate; default: project configuration")
     parser.add_argument("--weight-decay", type=float, help="SGD L2 weight decay; default: 0")
     parser.add_argument("--augmentation", choices=["none", "horizontal-flip"],
                         help="Training-only image augmentation; default: none")
     parser.add_argument("--output-dir", type=Path, help="Directory for this run's experiment output")
-    parser.add_argument("--compression", choices=["none", "qsgd", "qsgd-llz"], help="Client upload compression; default: none")
+    parser.add_argument("--compression", choices=["none", "qsgd", "qsgd-llz", "qsgd-llz-adaptive", "topk-ef"], help="Client upload compression; default: none")
+    parser.add_argument("--topk-k", type=int, default=None)
     parser.add_argument("--qsgd-levels", type=int, help="QSGD positive intervals s; default: 127")
     parser.add_argument("--llz-p", type=int,
                         help="LLZ tolerance in QSGD code levels; 0 is lossless")
     parser.add_argument("--llz-window", type=int, help="LLZ dictionary symbols per tensor; default: 128")
+    parser.add_argument('--llz-budget', type=float,
+                        help='Adaptive additional LLZ squared error / original update squared norm')
     test_options = parser.add_mutually_exclusive_group()
     test_options.add_argument("--skip-test", action="store_true", help="Use validation only (project default)")
     test_options.add_argument("--evaluate-test", action="store_true", help="Evaluate the validation-selected checkpoint on held-out test data")
@@ -56,6 +60,12 @@ def main():
             parser.error("--rounds must be positive")
         config["num-server-rounds"] = args.rounds
     config["manifest"] = manifest.as_posix()
+    if args.initial_checkpoint is not None:
+        if config['task-module'] != 'flower_face.finetune_task':
+            parser.error('--initial-checkpoint is supported by flower_face.finetune_task only')
+        from flower_face.finetune_task import file_hash
+        config['initial-checkpoint'] = args.initial_checkpoint.resolve().as_posix()
+        config['initial-checkpoint-sha256'] = file_hash(args.initial_checkpoint)
     if args.seed is not None:
         if not 0 <= args.seed < 2**32:
             parser.error("--seed must be in [0, 2**32 - 1]")
@@ -72,6 +82,8 @@ def main():
         config["augmentation"] = args.augmentation
     if args.compression is not None:
         config["compression"] = args.compression
+    if args.topk_k is not None:
+        config["topk-k"] = args.topk_k
     if args.qsgd_levels is not None:
         if not 1 <= args.qsgd_levels <= 65535:
             parser.error("--qsgd-levels must be in [1, 65535]")
@@ -83,6 +95,8 @@ def main():
     config["output-dir"] = (root / config["output-dir"]).as_posix()
     if args.llz_p is not None:
         config["llz-p"] = args.llz_p
+    if args.llz_budget is not None:
+        config['llz-budget'] = args.llz_budget
     if args.llz_window is not None:
         if not 1 <= args.llz_window <= 65535:
             parser.error("--llz-window must be in [1, 65535]")
@@ -95,7 +109,7 @@ def main():
     raise SystemExit(launch(config, root=root))
 
 
-def launch(config, *, root, app_dir=None, log_path=None):
+def launch(config, *, root, app_dir=None, log_path=None, progress=None):
     """Run one experiment, optionally from a small study source snapshot."""
     validate_task(config)
     runtime = root / ".flwr"
@@ -122,6 +136,14 @@ def launch(config, *, root, app_dir=None, log_path=None):
     if log_path is None:
         return subprocess.call(command, cwd=root, env=env)
     with Path(log_path).open("w", encoding="utf-8") as stream:
+        if progress is not None:
+            with subprocess.Popen(command, cwd=root, env=env, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace') as process:
+                for line in process.stdout:
+                    stream.write(line)
+                    stream.flush()
+                    progress(line.rstrip())
+                return process.wait()
         return subprocess.call(command, cwd=root, env=env, stdout=stream, stderr=subprocess.STDOUT)
 
 

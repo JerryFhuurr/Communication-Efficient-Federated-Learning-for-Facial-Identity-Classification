@@ -16,6 +16,8 @@ from compression.registry import REGISTRY, get_codec
 
 CODEC = "qsgd-l2-dense-v1"
 CODECS = {name: codec.wire_id for name, codec in REGISTRY.items()}
+CODECS["topk-ef"] = "topk-f32-u32-ef-v1"
+CODECS["qsgd-llz-adaptive"] = "qsgd-llz-adaptive-v1"
 __all__ = ["CODEC", "CODECS", "compression_settings", "llz_settings",
            "update_metadata", "encode_update", "encode_update_with_stats",
            "decode_update"]
@@ -24,12 +26,19 @@ __all__ = ["CODEC", "CODECS", "compression_settings", "llz_settings",
 def compression_settings(config):
     method = config.get("compression", "none")
     levels = config.get("qsgd-levels", 127)
-    if method not in ("none", "qsgd", "qsgd-llz"):
-        raise ValueError("compression must be 'none', 'qsgd', or 'qsgd-llz'")
+    if method not in ("none", "qsgd", "qsgd-llz", "qsgd-llz-adaptive", "topk-ef"):
+        raise ValueError("compression must be none, qsgd, qsgd-llz, qsgd-llz-adaptive, or topk-ef")
     if isinstance(levels, bool) or not isinstance(levels, int) or not 1 <= levels <= 65535:
         raise ValueError("qsgd-levels must be an integer in [1, 65535]")
     if method == "qsgd-llz":
         llz_settings(config, levels=levels)
+    if method == "qsgd-llz-adaptive":
+        from federated_compression.adaptive_llz import settings
+        settings(config, levels=levels)
+    if method == "topk-ef":
+        k = config.get("topk-k", 124000)
+        if type(k) is not int or not 1 <= k < 2**32:
+            raise ValueError("topk-k must be a positive uint32 integer")
     return method, levels
 
 

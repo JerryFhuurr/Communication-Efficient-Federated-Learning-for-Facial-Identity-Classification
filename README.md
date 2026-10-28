@@ -10,16 +10,24 @@ Implemented upload methods:
 - uncompressed FedAvg
 - QSGD
 - QSGD followed by LLZ-p
+- adaptive QSGD + LLZ-p, choosing p=0/1/2 under a measured extra-error budget
+- Top-k with error feedback
 
 LLZ-p with `p=0` has an exact replay gate: it must reconstruct the same QSGD
 updates and training trajectory. Positive `p` values are evaluated as a separate
-lossy method. LLZ-SI and Top-k are future research extensions.
+lossy method. LLZ-SI remains a future research extension. The
+[adaptive selector contract](docs/thesis/adaptive-llz-contract.md) explains the
+new method, diagnostics and short runtime check. The
+[local adaptive pilot report](outputs/adaptive-study-20261021T104244874038Z/report.md)
+contains the completed five-method, seed-42 DigiFace comparison, including
+accuracy, actual serialized bytes, selection overhead and limitations.
 
 See [FRAMEWORK.md](FRAMEWORK.md) for the task contract, experiment protocol,
 recovery guarantees, reporting semantics, and known limitations.
 
-The [thesis preparation documents](docs/thesis/README.md) contain the consolidated
-literature review, BibTeX references, and experimental design grounded in the
+The [current-stage thesis documentation](docs/thesis/README.md) contains the
+literature review, methodology, experimental design, paper-to-code audit,
+results discussion, supervisor summary, and BibTeX references grounded in the
 completed compression results.
 
 ## Project layout
@@ -188,12 +196,36 @@ loss improves over the warm-start baseline, the selected setting runs on seeds
 fine-tuning randomness only. The runner saves provenance, audited results and
 plots under its output directory and refuses to overwrite it.
 
-BatchNorm affine parameters train, but running statistics remain fixed. The
-current task accepts uncompressed training only: compression of its integer
-BatchNorm buffers needs an explicit policy before integration. CPU clients have
-a 900-second response timeout. Only layer4/head state is federated; prefix
+BatchNorm affine parameters train, but running statistics and integer counters
+remain fixed at their initial values. Compressed uploads encode only the
+trainable tensors; the server restores the fixed buffers after aggregation.
+Uncompressed uploads and all downloads include the full layer4/head state.
+Clients verify that local training did not change the fixed buffers. CPU clients
+have a 900-second response timeout. Only layer4/head state is federated; prefix
 distribution, cache extraction and earlier warm-start training are excluded
 from the additional rounds' communication counts.
+
+For a matched compression pilot on this stronger model:
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.compression_study --config experiments\digiface-finetune-compression.toml --output-dir outputs\finetune-compression-seed42
+```
+
+This runs one seed, 15 rounds per method: uncompressed, QSGD (127 levels), and
+QSGD + LLZ at p=0 and p=1 (window 128). Each starts from the same cached ImageNet
+layer4 and warm-start head, not a completed fine-tuning checkpoint. A fresh
+uncompressed control uses the same explicit buffer policy. The runner checks
+exact QSGD replay for p=0; test data stays unused. Generate plots with
+`python -m flower_face.report` followed by the printed study directory.
+
+The completed seed-42 pilot selected 83.3% validation accuracy for uncompressed
+training, 83.4% for QSGD and LLZ p=0, and 78.7% for LLZ p=1. All 15 p=0 rounds
+replayed QSGD exactly. Relative to QSGD, p=0 saved 88.21% of training-upload
+bytes and 9.79% of total serialized bytes. p=1 saved only another 1.15% of total
+bytes relative to p=0 while losing 4.7 accuracy percentage points. Keep p=0 as
+the working setting for this model; this single-seed pilot does not establish
+statistical equivalence. Counts include metadata and are not captured network
+traffic. Local results and plots are under `outputs/finetune-compression-seed42/`.
 
 If a batch stops, repeat its command with `--resume`. Completed results are
 verified and reused; interrupted attempts remain intact, and only incomplete
@@ -215,6 +247,40 @@ Use `flower_face.predict_pretrained` with the fine-tuned checkpoint and intermed
 manifest to predict directly from a cropped image. It reconstructs the frozen
 prefix and trained final stage; the intermediate feature cache is not needed
 for prediction, but the manifest and verified original weights are required.
+
+## Bounded accuracy refinement
+
+To check whether a lower learning rate helps the completed final-stage model:
+
+```powershell
+.venv\Scripts\python.exe -m flower_face.refine_finetune --previous-study outputs\finetune-layer4-batch\study.json --output outputs\finetune-low-lr-refinement
+```
+
+This reuses each seed's selected checkpoint and the existing feature cache. It
+runs five extra rounds at one tenth of the earlier learning rate on the seed-42
+checkpoint first. Seeds 43/44 follow only if validation loss improves and accuracy
+gains at least 0.5 percentage points. Continuation randomness uses seeds 10042–10044.
+All starting checkpoints remain eligible for selection; the held-out test stays
+unused. Results and plots are saved under the requested output directory. Use
+`--resume` after a stopped/failed batch to reuse completed results.
+
+For a standalone continuation, `flower_face.run --initial-checkpoint PATH` supports
+the fine-tuning task. The launcher records the checkpoint checksum; initialization
+rejects a mismatched task, identity mapping or manifest. This starts a new training
+stage and does not restore a previous round counter or optimizer state.
+
+On Windows, Flower's default ports can fall inside an OS-reserved range. If local
+SuperLink startup fails with a port error, check `netsh interface ipv4 show
+excludedportrange protocol=tcp`. For the reserved range encountered during this
+batch, these available replacement ports allowed the run to start:
+
+```powershell
+$env:FLWR_LOCAL_CONTROL_API_PORT = '49093'
+$env:FLWR_LOCAL_RUNTIME_API_PORT = '49091'
+```
+
+Set them in the same PowerShell session as the run command. Port availability can
+change; the override does not modify Windows port reservations.
 
 ## Validate the framework without images
 

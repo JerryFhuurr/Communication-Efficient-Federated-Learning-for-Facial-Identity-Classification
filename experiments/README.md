@@ -28,7 +28,17 @@ Earlier selected configurations remain available for reproducibility.
   compressed runs have already been performed. The original pretrained template
   preserves the first 57.3% pilot settings.
 - `synthetic.toml` is a fast end-to-end check of every compression path.
+- `digiface-finetune-compression.toml` compares uncompressed training, QSGD, and
+  QSGD + LLZ p=0/p=1 on the trainable ResNet-18 final stage and head. It reuses
+  the intermediate cache and warm-start head for one matched 15-round seed-42
+  pilot, with fixed BatchNorm buffers and no test evaluation.
 - `synthetic-grid.toml` demonstrates a QSGD-level and LLZ-window grid.
+
+The separate `adaptive-digiface-20261021.toml` is the frozen descriptor for the
+five-method adaptive pilot, with calibrated budgets 5.9 and 7.0. Its executable
+configs and hashes are in the output `protocol.json`; resume that batch with
+`python -m flower_face.adaptive_study --resume <study directory>`. It is not an
+input file for the older fixed-p `compression_study` command below.
 
 Copy a file before changing it for a thesis experiment so the committed template
 remains stable. Paths are resolved from the project root. Run a single study with:

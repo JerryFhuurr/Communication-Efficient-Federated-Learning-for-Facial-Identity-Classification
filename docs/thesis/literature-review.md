@@ -1,5 +1,10 @@
 # Communication-efficient federated learning with QSGD and LLZ-p
 
+For the 20 October supervisor direction, see the
+[adaptive-LLZ literature update](adaptive-llz-literature-review.md). This
+September review remains historical background; its experiment and future-work
+status should not replace the newer three-seed evidence and AE feasibility result.
+
 Focused literature review, 25 September 2026. Companion:
 [experimental design](experimental-design.md). Citation keys correspond to
 [references.bib](references.bib).
@@ -220,12 +225,13 @@ Experimental controls and transparent simulation assumptions are central to
 making such results interpretable. [Wang et al., 2021
 (`wang2021fieldguide`)](https://arxiv.org/abs/2107.06917)
 
-The next implementation-stage audit must still resolve every paper-to-code
-detail. In particular, Algorithm 2 initializes reconstructed history but uses
+The completed [paper-to-code audit](llz-paper-audit.md) records the interpretation
+used by this implementation. In particular, Algorithm 2 initializes reconstructed history but uses
 `g` in some dictionary expressions; the accompanying prose and worked example
 explicitly use reconstructed symbols. Our existing implementation follows that
-interpretation. The complete packet framing and deterministic tie rule are
-project choices, recorded in [the existing mapping](../../papers/README.md),
+interpretation. The deterministic tie rule follows ascending enumeration and
+last-match overwrite in the revised algorithm. Complete packet framing is a
+project choice, recorded in the audit and [existing mapping](../../papers/README.md),
 and should not be attributed to an author-provided wire format.
 
 ## 7. Source record and reading priorities
@@ -236,7 +242,7 @@ its content was checked from the supplied six-page PDF. Both local PDFs match
 the SHA256 fingerprints already recorded in `papers/README.md`. The revised
 manuscript's Algorithms 2-3 and Lemma 1 were also inspected as rendered pages.
 
-For the implementation audit, prioritize the revision's Section II (notation),
+For reviewing and maintaining the implementation, prioritize the revision's Section II (notation),
 Section III and Algorithms 2-3 (codec), Section V (assumptions and error), and
 Section VI (feedback and measurement). Use the conference version for historical
 context and report the revision used. Do not silently mix their pseudocode or

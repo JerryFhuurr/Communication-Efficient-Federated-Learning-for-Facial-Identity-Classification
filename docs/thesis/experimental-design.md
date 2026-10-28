@@ -133,8 +133,10 @@ Sources are `outputs/confirmed-head-compression-three-seeds/summary.json` and
 `outputs/finetune-layer4-batch/study.json`. The current 83.4% is a single-seed
 result and must not be compared as if it were a three-seed mean. The current
 0.1-point QSGD advantage represents one validation image, not evidence of an
-accuracy improvement. The last affected implementation test batch reported 84
-passes; no tests or training were rerun for this documentation task.
+accuracy improvement. The earlier affected implementation test batch reported
+84 passes; the subsequent paper-to-code audit passed 72 focused tests. These
+are separate batches, not an additive test count. Neither tests nor training
+were rerun for this documentation consolidation.
 
 ## 5. Metrics and measurement boundaries
 
@@ -221,7 +223,7 @@ Finish each agreed batch, audit once, and decide before expanding it.
 | Stage | Exact scope or decision rule | Gate and status |
 |---|---|---|
 | A: Current reference | Seed 42; none, QSGD, p=0, p=1; 15 rounds; levels 127; window 128 | Completed; preserve artifacts |
-| B: Seed confirmation | Seeds 43 and 44; none, QSGD, p=0 only; six additional 15-round runs | Planned after paper audit; reuse seed 42 only if source, initialization, and protocol compatibility are verified |
+| B: Seed confirmation | Seeds 43 and 44; none, QSGD, p=0 only; six additional 15-round runs | Audit completed; execution pending; reuse seed 42 only if source, initialization, and protocol compatibility are verified |
 | C: Focused lossy study | One controlled change, preferably feedback on/off, with matched QSGD and LLZ variants | Design proposal; implementation and exact batch require a new decision |
 | D: Sparsity comparator | Top-k with value/index/header accounting, calibrated to measured upload budget | Planned comparator, not presently implemented; feedback policy must be matched or shown as a separate factor |
 | E: Heterogeneity | Same global image split; redistribute training only with recorded client-class counts | Deferred until reference and partition implementation are ready |
@@ -331,8 +333,9 @@ Do not run this merely to regenerate a report for completed results.
 
 The literature synthesis, research questions, experimental controls, metrics,
 evidence table, limitations, and staged design are now written. The remaining
-supervisor decisions are listed in [the preparation index](README.md).
-Full paper-to-code certification, timing instrumentation, feedback, Top-k,
-non-IID support, and additional training are explicitly future work. Their
+supervisor decisions are listed in [the supervisor summary](supervisor-summary.md).
+The [paper-to-code audit](llz-paper-audit.md) is complete under its documented
+interpretation; it is not formal certification. Timing instrumentation, feedback,
+Top-k, non-IID support, and additional training are explicitly future work. Their
 absence does not prevent completion of these preparation documents, but they
 must not be represented as completed implementation features.

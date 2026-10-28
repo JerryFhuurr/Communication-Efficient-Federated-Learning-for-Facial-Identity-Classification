@@ -1,0 +1,57 @@
+# Frozen pilot descriptor; executable configs are in the output protocol.json.
+# Resume with python -m flower_face.adaptive_study --resume <study directory>.
+[study]
+seed = 42
+rounds = 15
+num-clients = 4
+methods = [
+    "qsgd",
+    "qsgd-llz-p0",
+    "qsgd-llz-p1",
+    "adaptive-tight",
+    "adaptive-loose",
+]
+tight-budget = 5.9
+loose-budget = 7.0
+source-sha256 = "23576d0398ac3b9bceed901558fba92d425e6b1e7d45b65f877f916518fa7de9"
+manifest-sha256 = "ae734e6a2d0e099bdc7169c934d480e17a4db90d588bad735e09a3929bea9e0a"
+protocol-sha256 = "a6c2a0e3440941e5ebaa23392468539e5e43bad0a6b7eb017ac3ea8b2c90cc1b"
+
+[task]
+task-module = "flower_face.finetune_task"
+manifest = "data/digiface-resnet18-layer3/manifest.json"
+num-classes = 100
+image-size = 224
+augmentation = "horizontal-flip"
+learning-rate = 0.003
+weight-decay = 0.0
+batch-size = 16
+local-epochs = 1
+evaluate-final-test = false
+
+[compression]
+qsgd-levels = 127
+llz-window = 128
+adaptive-p-candidates = [
+    0,
+    1,
+    2,
+]
+error-feedback = false
+normalization = "extra LLZ squared error / original update squared norm; whole client update"
+
+[calibration]
+saved-collection = "outputs/ae-calibration-20261005T122126176771Z"
+clients = [
+    0,
+    1,
+    2,
+    3,
+]
+snapshot-steps = [
+    24,
+    47,
+]
+budget-rule = "tight=floor to 2 significant digits of p1 relative-error Q25; loose=ceil to 2 significant digits of max(p2 Q75, 1.1*tight). If p1 Q25 is zero, use half the smallest positive candidate error before rounding."
+identity-validation-used = false
+held-out-test-used = false

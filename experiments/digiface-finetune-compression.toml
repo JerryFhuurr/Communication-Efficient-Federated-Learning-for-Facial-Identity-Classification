@@ -1,0 +1,21 @@
+# Matched seed-42 pilot: original 15-round fine-tuning trajectory, not a continuation.
+[study]
+seeds = [42]
+rounds = 15
+qsgd-levels = 127
+llz-p-values = [0, 1]
+llz-window = 128
+
+[task]
+task-module = "flower_face.finetune_task"
+manifest = "data/digiface-resnet18-layer3/manifest.json"
+num-classes = 100
+num-clients = 4
+image-size = 224
+augmentation = "horizontal-flip"
+learning-rate = 0.003
+weight-decay = 0.0
+batch-size = 16
+local-epochs = 1
+initial-checkpoint = ""
+initial-checkpoint-sha256 = ""
