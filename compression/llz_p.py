@@ -83,6 +83,44 @@ def _parse(values, p, window):
     return triplets
 
 
+
+def _parse_exact_byte(values, bound, window):
+    """Fast, compact exact-match parser for p=0 and an 8-bit alphabet.
+
+    Binary-search the longest non-overlapping substring in the byte-level
+    sliding window. bytes.rfind performs each search in optimized C and
+    returns the largest start, matching Algorithm 2's tie rule.
+    """
+    from array import array
+
+    source = (values.ravel(order="C").astype(np.int16) + bound).astype(np.uint8).tobytes()
+    count = len(source)
+    pointer = 0
+    maximum = 0
+    triplets = array("I")
+
+    while pointer < count:
+        first = max(0, pointer - window)
+        high = min(pointer - first, count - pointer - 1)
+        low = 0
+        while low < high:
+            middle = (low + high + 1) // 2
+            needle = source[pointer:pointer + middle]
+            if source.rfind(needle, first, pointer) >= 0:
+                low = middle
+            else:
+                high = middle - 1
+
+        best_length = low
+        best_start = source.rfind(source[pointer:pointer + best_length], first, pointer) if best_length else -1
+        position = best_start - first + 1 if best_length else 0
+        literal = source[pointer + best_length]
+        triplets.extend((position, best_length, literal))
+        maximum = max(maximum, best_length)
+        pointer += best_length + 1
+
+    return triplets, maximum
+
 def parse(symbols, *, alphabet_bound, p=0, window_size=128):
     """Return (1-based window position, match length, literal) triplets.
 
@@ -131,15 +169,30 @@ def encode(symbols, *, alphabet_bound, p=0, window_size=128):
     """Encode signed integer symbols into an LLP1 packet, including shape."""
     bound, p, window = _settings(alphabet_bound, p, window_size)
     values = _symbols(symbols, bound)
-    triplets = _parse(values, p, window)
-    maximum = max((t[1] for t in triplets), default=0)
-    header = HEADER.pack(MAGIC, values.ndim, bound, p, window, maximum, len(triplets))
+    compact = p == 0 and bound <= 127
+    if compact:
+        triplets, maximum = _parse_exact_byte(values, bound, window)
+        phrase_count = len(triplets) // 3
+    else:
+        triplets = _parse(values, p, window)
+        maximum = max((t[1] for t in triplets), default=0)
+        phrase_count = len(triplets)
+    header = HEADER.pack(MAGIC, values.ndim, bound, p, window, maximum, phrase_count)
     shape = struct.pack('<'+'I'*values.ndim, *values.shape)
     writer = _Writer()
-    for position, length, literal in triplets:
-        writer.write(position, window.bit_length())
-        writer.write(length, maximum.bit_length())
-        writer.write(literal+bound, (2*bound).bit_length())
+    if compact:
+        position_width = window.bit_length()
+        length_width = maximum.bit_length()
+        literal_width = (2*bound).bit_length()
+        for index in range(0, len(triplets), 3):
+            writer.write(triplets[index], position_width)
+            writer.write(triplets[index+1], length_width)
+            writer.write(triplets[index+2], literal_width)
+    else:
+        for position, length, literal in triplets:
+            writer.write(position, window.bit_length())
+            writer.write(length, maximum.bit_length())
+            writer.write(literal+bound, (2*bound).bit_length())
     return header+shape+writer.finish()
 
 

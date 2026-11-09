@@ -1,13 +1,55 @@
 # Current-stage thesis documentation
 
+**Revised pre-meeting schedule:** the [30 October-9 November plan](plan-2026-10-30-to-11-09.md)
+uses the completed PDF to bring budget justification, policy implementation,
+matched development/confirmation runs and the demonstration forward. Literature
+sharing remains 4 November; slides/source sharing remains 9 November evening.
+
+**2 November: literature-review PDF complete.** The
+[14-page review](../../outputs/literature-review-20261102/output/pdf/compression-for-federated-learning-review.pdf)
+contains 24 references, original diagrams/tables, the seed-42 pilot graph and
+explicit evidence boundaries. All pages were visually inspected; extracted-text
+checks confirmed the key results, 24 references and 63 hyperlink annotations.
+The final OpenReview PDF for the closest discrepancy-aware alternative was
+verified as ICLR 2026. [Editable sources and rebuild instructions](review-2026-11/README.md)
+are retained. The PDF is ready for review/sharing by 4 November.
+
+**29 October: plan for the 10 November meeting.** The literature-review PDF
+is due for sharing on **4 November**; slides and source code should be shared
+on **9 November in the evening**. Start with the
+[review outline and weekday work plan](literature-review-outline-2026-11.md)
+and [IEEE paper version comparison and project mapping](llz-ieee-version-comparison-2026-10-29.md).
+The 21 October IEEE Early Access publication has now been verified from the
+publisher PDF. Earlier manuscript-source records remain historical.
+The existing 28 October PDF is a draft awaiting full citation and render/layout
+review; it is not the final 4 November deliverable. No new training was run
+for today's source-reading and outline task.
+
+**29 October preparation blocks complete; 2 November source follow-up added.**
+All five [preparation blocks](review-preparation-20261030/progress.md) include
+source notes, a bounded recent search and an [integrated synthesis](review-preparation-20261030/05-synthesis.md).
+Bibliography metadata, local links, source fingerprints and pilot arithmetic
+were checked. The closest discrepancy-aware source was verified from its final
+OpenReview PDF on 2 November; abstract-only candidates remain identified as
+such. ASCEND's proof-report reference remains open. The adaptive-budget audit
+is summarized below. The current PDF deliverable is linked above.
+
 **28 October: new supervisor priorities.** Continue adaptive LLZ, independently
 justify the distortion budget, prepare a PDF literature review with graphs and
 tables before the next meeting, and demonstrate the result-generation process
 step by step. See the [feedback and research plan](feedback-2026-10-28.md).
 The initial [PDF review and worked example](../../outputs/supervisor-followup-20261028/deliverables/adaptive-llz-literature-and-methods-20261028.pdf)
 and [meeting walkthrough](../../outputs/supervisor-followup-20261028/deliverables/meeting-walkthrough.md)
-use existing evidence. A justified new budget remains open; 5.9 and 7.0 remain
-historical heuristic pilot settings. The exact next-meeting date is unspecified.
+use existing evidence. A matched single-seed sweep provisionally supports the
+budget choice: 5.9 is the only tested value that passes the frozen gate, not a
+proven accuracy-safe constant. The
+[3 November sensitivity audit](adaptive-budget-sensitivity-2026-11-03.md)
+records their exact origin, frozen-update replay, and a matched seed-42 sweep of
+tau=5.9, 6.5 and 7.0. Only 5.9 passes the predeclared 1-point validation
+gate; the report includes a full-run accuracy/upload/distortion plot, row-level
+selection audits and reproduction steps. The 5.9 choice remains provisional
+until confirmation on additional seeds.
+The meeting is 10 November; see the current plan above.
 
 **22 October: agreed next-meeting milestone complete.** The
 [next-meeting pack](../../outputs/meeting-next-20261022/README.md) includes an

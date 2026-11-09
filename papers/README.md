@@ -1,5 +1,11 @@
 # Source papers and LLZ implementation notes
 
+**Current reference, verified 29 October 2026:** the IEEE Early Access author
+version is now available locally. See reference 3 below and the
+[version comparison](../docs/thesis/llz-ieee-version-comparison-2026-10-29.md).
+Earlier publication-status statements record the evidence available at the
+time of the original manuscript audit.
+
 For the consolidated literature review, research questions, and experimental
 protocol, see [thesis preparation](../docs/thesis/README.md). That preparation
 uses the current results and separates the completed pilot from proposed work.
@@ -27,6 +33,17 @@ user's paper folder; they are not bundled into the application or copied into Gi
    SHA256: `048076c4ac508efce1c51d2673636c01e7c5a3235767b3e168765f8a7688611a`.
    The clean main manuscript occupies PDF pages 4-18 (printed pages 1-15).
    Later pages contain tracked changes, the conference version, and author responses.
+
+3. Yue Cao, Kai Liang, Shuoyao Wang, Huiru Zhong, and Youlong Wu,
+   *Federated Learning with Lossy Lempel-Ziv Gradient Compression*,
+   IEEE Transactions on Communications, Early Access, 21 October 2026.
+   DOI: https://doi.org/10.1109/TCOMM.2026.3745158 .
+   Local file: `papers/llz-tcomm-2026-early-access.pdf` (15 pages).
+   SHA256: `3afda19c845b24316e86d65d8d082a29129930bca6c69216f6a492ea7cd3e0ca`.
+   Downloaded through DTU Library on 29 October 2026. The PDF identifies itself
+   as an accepted author version that is not fully edited. It is locally
+   excluded from Git, including the Windows download marker; do not redistribute
+   this licensed PDF with the source code.
 
 Use the revised manuscript's Section III, Equation (5), Algorithms 2/3, and
 worked example (PDF pages 7-9) as the LLZ-p implementation reference. The older

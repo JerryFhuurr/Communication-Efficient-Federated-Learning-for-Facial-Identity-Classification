@@ -54,6 +54,8 @@ points. Dataset and compression code are separated by the task interface in
 
 ## Setup
 
+For the Linux installation on this PC, see [WSL2 setup](docs/wsl-setup.md).
+
 Python 3.11 is recommended. From the project root:
 
 ```powershell

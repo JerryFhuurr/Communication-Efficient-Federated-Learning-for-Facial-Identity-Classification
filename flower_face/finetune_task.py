@@ -14,7 +14,7 @@ from flower_face.task import read_manifest as read_image_manifest, test
 from flower_face.task import validate_augmentation, validate_weight_decay
 
 # CPU convolutional clients need longer than the small-head task's 120 seconds.
-ROUND_TIMEOUT = 900
+ROUND_TIMEOUT = 3600
 
 
 def fixed_state_names(model):
