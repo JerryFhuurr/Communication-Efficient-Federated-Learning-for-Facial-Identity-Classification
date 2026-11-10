@@ -1,80 +1,76 @@
-# Five-minute presentation notes — 10 November 2026
+# Presentation notes — supervisor meeting, 10 November 2026
 
-Prepared 5 November using completed WSL results. Slides 1–7 total 300 seconds. Slides 8–9 are supporting material. Pause at slide 3 to show the saved example only if useful; use its printed output instead of adding time to the talk.
+Matched on 9 November to the current eight-slide `adaptive-llz-meeting-20261110.pptx`. Use slides 1–7 for approximately five minutes. Slide 8 is an appendix for questions. Timing allows short pauses and pointing to the tables.
 
-## Slide 1 — 20 seconds
+## Slide 1 — Opening and main result (20 seconds)
 
-Today I will show the literature review, explain how I selected the LLZ error budget, and trace the experimental results. The main finding is that adaptive LLZ cuts training uploads by about 92 percent, but the frozen budget does not preserve accuracy within our chosen margin on both confirmation seeds.
+Today I’ll give a short update on the literature review and adaptive LLZ experiments. The main result is that we reduced training uploads by about 92 percent. However, the current budget failed our accuracy requirement on one confirmation seed, so the budget rule still needs improvement.
 
-## Slide 2 — 45 seconds
+## Slide 2 — Compression methods in the literature (45 seconds)
 
-The review covers six main lines of compression. Quantization changes numerical precision. Sparsification sends coordinates and their indices, often with error feedback. PowerSGD sends low-rank factors. Learned coding needs a compatible decoder whose transfer costs must be counted. Adaptive precision and side-information methods already exist. LLZ adds dictionary coding after quantization. Our narrower research question is whether choosing the LLZ tolerance after one fixed QSGD draw gives a useful learning and communication trade-off.
+I organized the literature by what each method sends and what extra costs it introduces. Quantization sends values at lower precision. Sparsification sends selected values together with their coordinate indices, often using error feedback. PowerSGD sends low-rank factors. Learned methods need a decoder, so its distribution and updates also matter.
 
-## Slide 3 — 45 seconds
+Adaptive compression already has several precedents. My specific question is whether a client can choose an LLZ tolerance after one fixed QSGD draw to reduce the complete message size while staying within an explicit reconstruction-error budget. The full review discusses the assumptions behind each method.
 
-Here is one real decision from the seed-43 confirmation run. The client forms its local model delta and makes one QSGD draw. It then encodes and locally decodes three LLZ tolerances. The extra squared error is normalized by the original update squared norm. Here p equals two gives the smallest message, but its error ratio is 6.494, above the 5.9 budget. The selector therefore sends p equals one at 208,554 bytes. The observed message size matches that choice. The supplied demonstration command prints these steps directly from the saved record.
+## Slide 3 — One saved client decision (45 seconds)
 
-## Slide 4 — 40 seconds
+This table shows a real decision from seed 43, round five, client one. First, the client trains locally and forms its model delta. It quantizes that delta once using QSGD, then tries LLZ with p equal to zero, one and two on the same quantized output.
 
-The numbers were not prescribed by the paper. They came from eight saved training-only updates. I rounded the lower quartile of the p-equals-one error ratios down to 5.9. The loose rule used the upper quartile for p equals two and rounded up to seven. This makes the origin reproducible, but eight clustered snapshots are weak calibration evidence. I therefore assessed learning separately, using the agreed one-percentage-point accuracy margin. Meeting a reconstruction limit is only a check that the selector follows its rule.
+The extra-error ratios are zero, 5.851 and 6.494. With a budget of 5.9, only p zero and p one are feasible. Although p two gives the smallest message, it exceeds the budget. The client therefore chooses p one and sends 208,554 bytes. The saved observed message size matches this selection.
 
-## Slide 5 — 50 seconds
+## Slide 4 — Where 5.9 and 7 came from (40 seconds)
 
-I then tested 5.9, 6.5 and seven using the same seed-42 WSL setup. QSGD reached 83.5 percent, which puts the development threshold at 82.5 percent. Adaptive 5.9 reached 83.2 percent and used 40.924 megabytes of uploads. At 6.5 the accuracy fell to 81.1 percent, and at seven it fell to 78.9 percent. Both failed the margin despite sending less data. Under the declared rule, 5.9 was the only passing tested budget. I froze it before the confirmation runs. This supports a development choice among these points, rather than a universal optimum.
+The original budget values came from eight saved training-only updates: four clients at two points in separate local training trajectories. For p one, the lower quartile of the error ratios was about 5.924. Rounding down gave 5.9. The loose rule used the upper quartile for p two and rounded up to seven.
 
-## Slide 6 — 60 seconds
+These rules explain the numbers’ origin, but they do not establish learning safety. I assessed learning separately using our agreed criterion: adaptive accuracy should fall by no more than one percentage point compared with matched QSGD.
 
-The confirmation is less positive than the first seed suggested. On seed 43, QSGD reached 83.6 percent and adaptive reached 83.3, so it passed. On seed 44, the corresponding values were 83.2 and 82.0, a 1.2-point drop, so it failed the frozen gate. Uploads fell by about 92 percent in both pairs. All selections passed the saved diagnostic audit, which shows correct policy execution but does not establish learning safety. I excluded an incomplete seed-44 attempt and used its completed retry with exactly the same settings. I have kept the failure and have not tuned the budget using these confirmation results.
+## Slide 5 — Budget sensitivity on development seed 42 (50 seconds)
 
-## Slide 7 — 40 seconds
+I tested the three budgets using the same DigiFace setup: 100 identities, four IID clients, 15 rounds and one local epoch. The model trains ResNet-18 layer four and its classifier using cached layer-three features.
 
-My conclusion is that we now have a reproducible adaptive LLZ implementation and a measurable communication gain, but the current calibration rule does not pass our accuracy requirement consistently. I propose using fresh development evidence to study a tighter budget or one that changes during training. A second option is to account for total error or alignment with the original update, since the current constraint only measures added LLZ error. I also want to reduce candidate-search cost. I would like your advice on the accuracy margin and whether a matched error-feedback ablation should follow this budget work.
+QSGD reached 83.5 percent validation accuracy, so the development threshold was 82.5 percent. At a budget of 5.9, adaptive LLZ reached 83.2 percent and sent about 40.9 megabytes of uploads. Increasing the budget to 6.5 reduced uploads further, but accuracy fell to 81.1 percent. At seven, it fell to 78.9 percent.
 
-## Slide 8 — appendix
+Only 5.9 passed among these tested budgets. I then froze that policy before confirmation.
 
-Use only if asked. These are WSL controls, not the older Windows pilot. LLZ p=0 adds no loss to the quantized reconstruction. It still follows a lossy QSGD first stage. Whole-launch times include training, evaluation, codecs and startup, and they are descriptive rather than randomized runtime benchmarks. Total traffic is dominated by downloads and other exchanges. The existing Top-k baseline includes error feedback while this LLZ study does not, so it is not a matched comparator here.
+## Slide 6 — Frozen confirmation on seeds 43 and 44 (60 seconds)
 
-## Slide 9 — appendix
+For confirmation, I ran matched QSGD and adaptive experiments on seeds 43 and 44, keeping the code, data and training settings fixed. Each pair used the same initialization, and I did not change the budget after seeing the results.
 
-Use the meeting README for the exact paths and commands. The demonstration recomputes feasibility and minimum-byte selection from saved diagnostics. It does not rerun quantization or regenerate the original model delta. Full training reproduction requires the local data/cache and recorded environment. Git HEAD alone is insufficient because the frozen run used a working tree with changes. The source ZIP includes the matching Python/TOML snapshot and an explicit fingerprint manifest.
+On seed 43, QSGD reached 83.6 percent and adaptive reached 83.3 percent. The drop was 0.3 percentage points, so it passed. On seed 44, the accuracies were 83.2 and 82.0 percent. That 1.2-point drop failed the one-point requirement.
 
-## Likely questions and short answers
+Both adaptive runs reduced uploads by about 92 percent and passed the selection audit. This shows that the selector follows its rule, while the learning outcome still varies. These are validation-selected checkpoints, and the held-out test remains unused.
 
-**Why exactly 5.9 and 7?** The values came from stated rounding rules applied to training-only candidate-error quantiles: Q25(p=1)=5.923659 gave 5.9; max(Q75(p=2)=6.928620,1.1×5.9) rounded up gave 7. These are traceable pilot choices. Seed-42 development supported 5.9 among the tested budgets, but confirmation failed on seed 44, so the evidence does not establish a generally safe threshold.
+## Slide 7 — Interpretation and next research decision (40 seconds)
 
-**What does tau mean?** It limits added LLZ squared error relative to the original model-delta squared norm. Tau=5.9 is dimensionless and allows an extra-error norm up to sqrt(5.9), about 2.43 times the update norm. It is neither a percentage nor an accuracy-loss allowance. It controls added LLZ error rather than total reconstruction error.
+We now have a working adaptive LLZ implementation and a reproducible path from individual client decisions to the final results. The remaining issue is how to choose a budget that preserves learning more consistently.
 
-**Does max rho≈5.895 prove the budget is appropriate?** It shows the chosen update met the configured constraint. The selector excludes values above tau by construction. Learning suitability requires the separate matched training comparison, which failed its per-seed accuracy gate on seed 44.
+My proposed next step is to study a tighter budget, or one that changes during training, using fresh development evidence. We could also consider total reconstruction error or update alignment, since the current budget only measures added LLZ error. Candidate-search cost also needs attention.
 
-**Can we choose a new threshold using seed 44?** That would make the confirmation outcome part of policy development. Keep this failure in the report and use a newly declared development/confirmation protocol for any revised rule.
+I’d like your advice on which budget approach to prioritize and when to add a matched error-feedback comparison.
 
-**Why not simply use p=1 as in the paper?** Its empirical success depends on the task and training setup. Our WSL seed-42 p=1 control reached 79.3% versus 83.5% for QSGD. Our local-epoch face task differs from the paper's gradient experiments. This motivates adaptation without contradicting their reported cases.
+## Slide 8 — Appendix: communication boundaries and controls (only if asked)
 
-**Is p=0 lossless?** LLZ p=0 exactly preserves the quantized reconstruction. The QSGD first stage still introduces error relative to the original full-precision delta. The seed-42 p=0 learning records numerically replay QSGD.
+This table provides the seed-42 controls. LLZ with p zero reproduced QSGD’s numerical training results because it adds no further loss to the quantized representation. Fixed p one sent fewer bytes but reached lower validation accuracy in this setup.
 
-**Why did a correct selector lose accuracy?** The local budget only constrains extra reconstruction error. It does not constrain accumulated optimization error, alignment with the update, or validation accuracy across client/round trajectories. Error feedback is also disabled in this study.
+The large saving applies to training uploads. Total serialized-object savings were about 10.2 percent because downloads and other exchanges account for most of the total. These are logical Flower object sizes. We did not capture physical network traffic.
 
-**How much communication did we save?** Training upload objects fell about 92.1% and 92.2% on seeds 43/44. Total serialized objects fell about 10.2%, because downloads and other exchanges dominate. These are logical Flower sizes, not physical network measurements. MB means one million bytes.
+Adaptive runs also took longer: around 46 and 56 minutes, compared with roughly 12 minutes for QSGD. Those are complete launch times, so they include training and evaluation as well as compression.
 
-**What is the runtime cost?** QSGD launches took 11.6 and 12.4 minutes; adaptive took 46.3 and 56.1 minutes. These include the full launch and are descriptive, not randomized codec timings. Multiple candidate encodings contribute overhead.
+## Presenter cues
 
-**Why not include Top-k here?** The previous Top-k baseline used error feedback while this LLZ study did not. These runs isolate the adaptive budget. A fair future comparison should match residual rules, training conditions and complete byte accounting.
+- On slide 3, point to the p=2 row before explaining why p=1 wins.
+- On slide 5, point to the red 82.5% gate, then the accuracy curve and upload table.
+- On slide 6, state the seed-44 failure clearly. Do not retell it as a pass based on average accuracy.
+- Finish the main talk after slide 7. Use slide 8 when the discussion turns to p=0, communication accounting or runtime.
+- If asked for the live walkthrough, run `python3 demo_saved_decision.py` from this folder. It rechecks saved diagnostics and does not retrain or regenerate the original update.
+- The literature PDF in this folder is the dated 2 November snapshot. The slides contain the newer budget-sweep and confirmation results.
 
-**What is novel given existing adaptive compression?** Adaptation is already established. The narrow implementation is measured-byte minimization over locally decoded LLZ tolerances after one shared QSGD draw, under an explicit additional-error constraint. AdaQuantFL/DAdaQuant adapt precision; KLMS uses distributional side information; ASCEND selects among compressors using reward feedback; discrepancy-aware calibration scores components by model-output discrepancy. The review discusses these precedents. Do not claim priority or a new theorem.
+## Questions to ask
 
-**Are the results test accuracy or statistical equivalence?** They are accuracies at checkpoints selected by minimum validation loss. The held-out test remains unused. Two confirmation seeds are limited evidence; the per-seed criterion failed and no equivalence claim is justified.
+1. Should I first investigate a tighter budget schedule, or change the quality measure to total error or update alignment?
+2. Should the next matched comparison introduce error feedback before adding more compression methods?
+3. Which parts of the literature review need strengthening for the thesis chapter?
 
-**What happened to seed 44?** The first adaptive attempt was incomplete. Its same-settings retry completed all 15 rounds. Only that completed retry appears in the comparison, with the earlier attempt retained for provenance.
+## Evidence
 
-**Can you show exactly where a result comes from?** Open the saved row, divide each candidate squared error by `qsgd_input_squared_norm`, apply tau, select the cheapest feasible complete message and compare observed bytes. Then show `best_checkpoint.json`, `communication.json` and `confirmation-summary.json` for the full run. Code and manifest fingerprints identify the matched protocol.
-
-## Questions to ask the supervisor
-
-1. Should the next budget use total error or update alignment, or should we first study a tighter schedule over training rounds?
-2. Does the 1.0 percentage-point accuracy margin remain suitable for the thesis objective? Any revised margin should be declared prospectively.
-3. After the budget revision, should the next comparison prioritize matched error feedback or a matched Top-k baseline?
-4. Which claims or missing literature links need the most work before this review becomes a thesis chapter?
-
-## Short opening if the meeting runs late
-
-“I finished the literature review and made the adaptive LLZ study reproducible. The budget values now have a documented calibration origin and a matched sensitivity study. The frozen 5.9 policy reduced uploads by about 92 percent, but seed 44 lost 1.2 accuracy points and failed our one-point gate. I would like to discuss how to improve the budget rule using fresh development evidence.”
+The PowerPoint supplies the slide order, displayed values and chart series. Supporting data are `confirmation-summary.json`, `budget-sweep.csv` and `saved-decision.json` in this folder. The frozen source identity is in `source-sha256.txt`. The literature review is available at https://www.overleaf.com/project/6aeb378d04c7d5dba6f6b8f9 .

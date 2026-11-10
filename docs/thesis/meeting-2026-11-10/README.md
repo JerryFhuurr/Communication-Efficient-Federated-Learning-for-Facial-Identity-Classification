@@ -1,8 +1,8 @@
 # Supervisor meeting — 10 November 2026
 
-Updated 5 November with completed WSL development, budget sensitivity and frozen confirmation evidence. The earlier Windows-pilot deck remains historical and should not be used as the current meeting presentation.
+Updated 9 November with completed WSL development, budget sensitivity and frozen confirmation evidence. The earlier Windows-pilot deck remains historical and should not be used as the current meeting presentation.
 
-Current package: `outputs/meeting-20261110-20261105/`. Its README contains the run settings, original evidence locations, reproduction commands and source identity. The editable PowerPoint contains seven main slides for five minutes and two appendix slides. It includes the literature comparison, budget rationale, real saved-update example and per-seed confirmation results.
+Current package: `outputs/meeting-20261110-20261105/`. Its README contains the run settings, original evidence locations, reproduction commands and source identity. The editable PowerPoint contains seven main slides for five minutes and one appendix slide. It includes the literature comparison, budget rationale, real saved-update example and per-seed confirmation results.
 
 `presentation-notes.md` contains the timed script and Q&A. `confirmation-protocol.md` preserves the frozen setup and pass/fail results. `reproduction.md` and `saved-update-walkthrough.md` point to the current package.
 

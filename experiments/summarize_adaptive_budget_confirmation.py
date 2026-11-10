@@ -17,7 +17,9 @@ def load_run(seed: int, method: str) -> dict:
     exp = json.loads((path / "experiment.json").read_text())
     if exp.get("status") != "completed":
         raise RuntimeError(f"{path}: run status is {exp.get('status')!r}")
+    # Report validation accuracy at the checkpoint with lowest validation loss.
     cp = json.loads((path / "best_checkpoint.json").read_text())
+    # Read the saved communication ledger for the complete run.
     comm = json.loads((path / "communication.json").read_text())["totals"]
     cfg = exp["config"]
     record = {
@@ -27,8 +29,11 @@ def load_run(seed: int, method: str) -> dict:
         "rounds": cfg["num-server-rounds"], "test_evaluated": cfg["evaluate-final-test"],
         "budget": cfg["llz-budget"], "accuracy_percent": cp["validation_accuracy"] * 100,
         "validation_loss": cp["validation_loss"], "best_round": cp["step"],
+        # Uploads sum serialized client training replies across all rounds.
         "training_upload_bytes": comm["train"]["uplink"]["serialized_object_bytes"],
         "training_upload_MB": comm["train"]["uplink"]["serialized_object_bytes"] / 1e6,
+        # Total includes both directions and all recorded phases.
+        # These are logical object bytes, not captured network traffic.
         "total_object_bytes": comm["total"]["serialized_object_bytes"],
         "total_object_MB": comm["total"]["serialized_object_bytes"] / 1e6,
         "elapsed_seconds": exp["elapsed_seconds"], "mean_selected_rho": None,
