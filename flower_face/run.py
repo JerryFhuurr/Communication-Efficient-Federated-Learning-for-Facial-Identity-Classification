@@ -24,6 +24,7 @@ def default_config(root):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, help="TOML file with a [task] section; CLI flags override it")
     parser.add_argument("--rounds", type=int)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument('--task-module', help='Task implementation module under flower_face')
@@ -51,6 +52,17 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     config = default_config(root)
+    if args.config is not None:
+        try:
+            overrides = tomllib.loads(args.config.read_text(encoding="utf-8"))["task"]
+        except (OSError, ValueError, KeyError) as error:
+            parser.error(f"Could not read the [task] configuration: {error}")
+        if not isinstance(overrides, dict):
+            parser.error("The [task] configuration must be a TOML table")
+        unknown = set(overrides) - set(config)
+        if unknown:
+            parser.error(f"Unknown [task] configuration keys: {', '.join(sorted(unknown))}")
+        config.update(overrides)
     for key in ('task_module', 'num_classes', 'num_clients', 'image_size'):
         if getattr(args, key) is not None:
             config[key.replace('_', '-')] = getattr(args, key)

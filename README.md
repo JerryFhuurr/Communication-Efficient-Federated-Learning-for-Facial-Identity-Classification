@@ -69,15 +69,51 @@ Run all tests:
 .venv\Scripts\python.exe -m pytest -q
 ```
 
+## CIFAR-10 with ResNet-18
+
+The CIFAR-10 profile trains a ResNet-18 from scratch at 32×32 pixels with a
+stride-1 3×3 stem, no initial max pool and GroupNorm. GroupNorm keeps the
+state floating point for the existing compression codecs. These choices,
+FedAvg model updates and the error-feedback settings define this project’s
+benchmark protocol.
+
+Prepare the dataset once from the [official binary archive](https://www.cs.toronto.edu/~kriz/cifar.html). Run these commands from the WSL project root.
+
+```bash
+curl --fail --location --output data/cifar-10-binary.tar.gz https://www.cs.toronto.edu/~kriz/cifar-10-binary.tar.gz
+.venv/bin/python -m flower_face.prepare_cifar10 --archive data/cifar-10-binary.tar.gz
+```
+
+Preparation verifies the publisher’s archive checksum, takes 5,000 validation
+examples from the official training set, partitions train and validation by
+class across four clients, and keeps the official 10,000-image test split.
+The manifest records the split seed and SHA-256 checksums for the data files.
+
+The first command runs one round on the smoke split. The second launches the full-data baseline.
+
+```bash
+.venv/bin/python -m flower_face.run --config experiments/cifar10-resnet18.toml \
+  --manifest data/cifar10/smoke-manifest.json --rounds 1 --compression qsgd \
+  --output-dir outputs/cifar10-smoke
+.venv/bin/python -m flower_face.run --config experiments/cifar10-resnet18.toml
+```
+
+The full profile defaults to 15 rounds with uncompressed uploads. Select
+QSGD or fixed LLZ using `--compression qsgd` or
+`--compression qsgd-llz --llz-p 0`. For adaptive LLZ, use
+`--compression qsgd-llz-adaptive` and a budget calibrated on CIFAR-10
+development updates. Use `--evaluate-test` for final held-out evaluation
+after freezing the configuration.
+
 ## CelebA demo
 
-The local `img_align_celeba/`, `identity_CelebA.txt`, and
-`list_eval_partition.txt` inputs are ignored by Git. Build the deterministic
-subset manifest and run the default configuration:
+The saved CelebA demo uses `data/subset/manifest.json` and the images it
+references in `img_align_celeba/`. To prepare a new subset, first obtain the
+full image collection and use `flower_face.prepare_data` with the local
+identity and split metadata. Run the saved demo from the WSL project root.
 
-```powershell
-.venv\Scripts\python.exe -m flower_face.prepare_data --images img_align_celeba
-.venv\Scripts\python.exe -m flower_face.run
+```bash
+.venv/bin/python -m flower_face.run
 ```
 
 The default run uses four simulated clients and writes an immutable experiment
