@@ -24,6 +24,11 @@ reports = ["matplotlib>=3.8,<4"]
 include = ["flower_face*", "compression*", "federated_compression*"]
 
 [tool.flwr.app]
+fab-include = [
+    "flower_face/**/*.py",
+    "compression/**/*.py",
+    "federated_compression/**/*.py",
+]
 publisher = "local"
 
 [tool.flwr.app.components]
