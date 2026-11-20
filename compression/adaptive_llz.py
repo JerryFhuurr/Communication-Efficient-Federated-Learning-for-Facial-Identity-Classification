@@ -1,8 +1,7 @@
-"""Whole-update LLZ selection, with no Flower, Torch or dataset dependency.
+"""Choose one LLZ tolerance for a complete client update.
 
-One QSGD draw per tensor is shared by p=0/1/2. The constraint is additional
-LLZ squared error <= budget * original update squared norm. A caller can
-provide the actual serialized-message cost; the default counts packet bytes.
+Each tensor is quantized once. The LLZ candidates share those QSGD codes,
+and the distortion budget applies to the sum across all tensors.
 """
 
 from dataclasses import dataclass
@@ -42,10 +41,10 @@ def validate_budget(budget):
 
 
 def admissible(error, squared_norm, budget):
-    # Check added LLZ squared error / original update squared norm <= budget.
-    # This controls reconstruction distortion, not validation accuracy.
-    # Avoid overflow in budget*norm and do not introduce an epsilon at zero.
-    return error == 0 if squared_norm == 0 or budget == 0 else error / squared_norm <= budget
+    if squared_norm == 0 or budget == 0:
+        return error == 0
+    # Divide to avoid overflowing when the update norm and budget are large.
+    return error / squared_norm <= budget
 
 
 def _squared(values):
@@ -67,58 +66,78 @@ def select(updates, *, levels, rng, budget, window_size=128, cost=None):
     budget = validate_budget(budget)
     if not updates or any(not isinstance(name, str) for name in updates):
         raise ValueError('Expected a nonempty mapping of named update tensors')
-    common = dict(qsgd_quantization_squared_error=0.0, qsgd_input_squared_norm=0.0,
-                  qsgd_max_abs_error=0.0, qsgd_coordinate_count=0)
+    qsgd_stats = dict(
+        qsgd_quantization_squared_error=0.0,
+        qsgd_input_squared_norm=0.0,
+        qsgd_max_abs_error=0.0,
+        qsgd_coordinate_count=0,
+    )
     candidates = tuple(Candidate(p, {}, dict(
-        llz_code_squared_error=0.0, llz_reconstruction_squared_error=0.0,
-        llz_qsgd_squared_norm=0.0, llz_max_code_error=0, llz_symbol_count=0,
-        llz_total_squared_error=0.0)) for p in CANDIDATES)
+        llz_code_squared_error=0.0,
+        llz_reconstruction_squared_error=0.0,
+        llz_qsgd_squared_norm=0.0,
+        llz_max_code_error=0,
+        llz_symbol_count=0,
+        llz_total_squared_error=0.0,
+    )) for p in CANDIDATES)
     for name in sorted(updates):
         original = np.asarray(updates[name])
-        # 1. Quantize once per tensor; all LLZ candidates share this draw.
-        q = qsgd.quantize(original, levels=levels, rng=rng)
-        full = original.astype(np.float64)
-        z = qsgd.dequantize(q).astype(np.float64)
-        error = z - full
-        common['qsgd_quantization_squared_error'] += _squared(error)
-        common['qsgd_input_squared_norm'] += _squared(full)
-        common['qsgd_max_abs_error'] = max(common['qsgd_max_abs_error'],
-                                         float(np.max(np.abs(error), initial=0)))
-        common['qsgd_coordinate_count'] += q.codes.size
-        # 2. Try p=0,1,2 on the same QSGD codes and decode each locally.
+        quantized = qsgd.quantize(original, levels=levels, rng=rng)
+        original_values = original.astype(np.float64)
+        qsgd_values = qsgd.dequantize(quantized).astype(np.float64)
+        quantization_error = qsgd_values - original_values
+        symbol_count = quantized.codes.size
+        qsgd_stats['qsgd_quantization_squared_error'] += _squared(quantization_error)
+        qsgd_stats['qsgd_input_squared_norm'] += _squared(original_values)
+        qsgd_stats['qsgd_max_abs_error'] = max(
+            qsgd_stats['qsgd_max_abs_error'],
+            float(np.max(np.abs(quantization_error), initial=0)),
+        )
+        qsgd_stats['qsgd_coordinate_count'] += symbol_count
+
         for candidate in candidates:
-            packet = qsgd_llz.pack(q, p=candidate.p, window_size=window_size)
-            restored = qsgd_llz.unpack(packet, max_symbols=q.codes.size,
-                expected_p=candidate.p, expected_window_size=window_size)
-            values = qsgd.dequantize(restored).astype(np.float64)
-            code_error = restored.codes.astype(np.int64) - q.codes.astype(np.int64)
-            # Added LLZ error is relative to z; total also includes QSGD.
-            extra, total = values - z, values - full
+            packet = qsgd_llz.pack(quantized, p=candidate.p, window_size=window_size)
+            restored = qsgd_llz.unpack(
+                packet, max_symbols=symbol_count, expected_p=candidate.p,
+                expected_window_size=window_size,
+            )
+            restored_values = qsgd.dequantize(restored).astype(np.float64)
+            code_error = restored.codes.astype(np.int64) - quantized.codes.astype(np.int64)
+            # The budget uses the error added to the QSGD reconstruction.
+            added_error = restored_values - qsgd_values
+            total_error = restored_values - original_values
             stats = candidate.stats
             stats['llz_code_squared_error'] += float(np.sum(code_error * code_error))
-            stats['llz_reconstruction_squared_error'] += _squared(extra)
-            stats['llz_qsgd_squared_norm'] += _squared(z)
-            stats['llz_total_squared_error'] += _squared(total)
-            stats['llz_max_code_error'] = max(stats['llz_max_code_error'],
-                int(np.max(np.abs(code_error), initial=0)))
-            stats['llz_symbol_count'] += int(q.codes.size)
+            stats['llz_reconstruction_squared_error'] += _squared(added_error)
+            stats['llz_qsgd_squared_norm'] += _squared(qsgd_values)
+            stats['llz_total_squared_error'] += _squared(total_error)
+            stats['llz_max_code_error'] = max(
+                stats['llz_max_code_error'], int(np.max(np.abs(code_error), initial=0)),
+            )
+            stats['llz_symbol_count'] += int(symbol_count)
             candidate.packets[name] = packet
-    if common['qsgd_coordinate_count'] == 0:
+
+    if qsgd_stats['qsgd_coordinate_count'] == 0:
         raise ValueError('Update must contain at least one coordinate')
     for candidate in candidates:
-        candidate.stats.update(common)
+        candidate.stats.update(qsgd_stats)
         if any(not math.isfinite(value) for value in candidate.stats.values()):
             raise ValueError('Nonfinite adaptive LLZ distortion; update scale is unsupported')
-    # 3. Use the caller's serialized reply cost, or codec bytes by default.
-    costs = tuple(cost(c, candidates) if cost else c.payload_bytes for c in candidates)
+
+    costs = tuple(
+        cost(candidate, candidates) if cost else candidate.payload_bytes
+        for candidate in candidates
+    )
     if any(type(size) is not int or size < 0 for size in costs):
         raise ValueError('Candidate byte costs must be nonnegative integers')
-    # 4. Keep candidates within the whole-update reconstruction budget.
-    feasible = [c for c in candidates if admissible(
-        c.stats['llz_reconstruction_squared_error'], common['qsgd_input_squared_norm'], budget)]
-    # p=0 is always feasible; a codec failure must raise rather than relax budget.
+
+    update_norm = qsgd_stats['qsgd_input_squared_norm']
+    feasible = [
+        candidate for candidate in candidates
+        if admissible(candidate.stats['llz_reconstruction_squared_error'], update_norm, budget)
+    ]
+    # If p=0 adds error, the lossless codec has failed.
     if not feasible or candidates[0].stats['llz_reconstruction_squared_error'] != 0:
         raise RuntimeError('Lossless LLZ fallback failed')
-    # 5. Choose the cheapest feasible candidate; byte ties prefer lower p.
-    chosen = min(feasible, key=lambda c: (costs[c.p], c.p))
+    chosen = min(feasible, key=lambda candidate: (costs[candidate.p], candidate.p))
     return Selection(chosen, candidates, costs, budget)

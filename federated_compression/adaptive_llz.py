@@ -21,9 +21,15 @@ def settings(config, *, levels=127):
 
 
 def metadata(*, levels, server_round, p, window, budget):
-    return dict(codec=WIRE_ID, **{'server-round': server_round, 'levels': levels,
-        'llz-p': p, 'llz-window': window, 'llz-budget': float(budget),
-        'distortion': 'additional-llz-over-original-squared-norm-v1'})
+    return {
+        'codec': WIRE_ID,
+        'server-round': server_round,
+        'levels': levels,
+        'llz-p': p,
+        'llz-window': window,
+        'llz-budget': float(budget),
+        'distortion': 'additional-llz-over-original-squared-norm-v1',
+    }
 
 
 def encode_reply(trained, reference, *, levels, seed, server_round, client_id,
@@ -34,39 +40,50 @@ def encode_reply(trained, reference, *, levels, seed, server_round, client_id,
         raise ValueError('Model tensor names differ from reference')
     updates = {}
     for name in sorted(reference):
-        value, base = trained[name].detach().cpu(), reference[name].detach().cpu()
-        if value.shape != base.shape or value.dtype != base.dtype:
+        trained_tensor = trained[name].detach().cpu()
+        reference_tensor = reference[name].detach().cpu()
+        if trained_tensor.shape != reference_tensor.shape or trained_tensor.dtype != reference_tensor.dtype:
             raise ValueError(f'Model shape/dtype mismatch: {name}')
-        if value.dtype not in (torch.float32, torch.float64):
+        if trained_tensor.dtype not in (torch.float32, torch.float64):
             raise ValueError(f'QSGD requires floating model tensors: {name}')
-        updates[name] = (value - base).numpy()
+        updates[name] = (trained_tensor - reference_tensor).numpy()
 
-    def message(candidate, candidates, costs, seconds):
-        # Fixed-width double diagnostics make the byte-cost preflight identical
-        # in size to the final record even before costs/timing are filled in.
-        diagnostics = dict(candidate.stats, adaptive_selected_p=candidate.p,
-            adaptive_budget=float(budget), adaptive_selection_seconds=float(seconds),
+    def build_reply(candidate, candidates, costs, selection_seconds):
+        diagnostics = dict(
+            candidate.stats,
+            adaptive_selected_p=candidate.p,
+            adaptive_budget=float(budget),
+            adaptive_selection_seconds=float(selection_seconds),
             adaptive_candidate_p=[float(c.p) for c in candidates],
             adaptive_candidate_payload_bytes=[float(c.payload_bytes) for c in candidates],
             adaptive_candidate_message_bytes=list(map(float, costs)),
             adaptive_candidate_squared_error=[c.stats['llz_reconstruction_squared_error'] for c in candidates],
             adaptive_candidate_total_squared_error=[c.stats['llz_total_squared_error'] for c in candidates],
-            adaptive_selected_message_bytes=float(costs[candidate.p]))
-        content = RecordDict({'qsgd': ConfigRecord(candidate.packets),
+            adaptive_selected_message_bytes=float(costs[candidate.p]),
+        )
+        content = RecordDict({
+            'qsgd': ConfigRecord(candidate.packets),
             'update': ConfigRecord(metadata(levels=levels, server_round=server_round,
                 p=candidate.p, window=window, budget=budget)),
             'metrics': MetricRecord(dict(metrics, **diagnostics)),
-            'client': ConfigRecord({'partition-id': client_id})})
+            'client': ConfigRecord({'partition-id': client_id}),
+        })
         return Message(content=content, reply_to=instruction)
 
-    def cost(candidate, candidates):
-        return measure(message(candidate, candidates, (0, 0, 0), 0.0))['serialized_object_bytes']
+    def reply_size(candidate, candidates):
+        # Costs and timings are stored as doubles. Filling them in later keeps
+        # their encoded width, so the trial reply gives the final byte count.
+        trial_reply = build_reply(candidate, candidates, (0, 0, 0), 0.0)
+        return measure(trial_reply)['serialized_object_bytes']
 
-    selection = adaptive_llz.select(updates, levels=levels,
-        rng=np.random.default_rng(np.random.SeedSequence([seed, server_round, client_id, 0x51534744])),
-        budget=budget, window_size=window, cost=cost)
-    reply = message(selection.selected, selection.candidates, selection.costs, perf_counter()-started)
-    if measure(reply)['serialized_object_bytes'] != selection.costs[selection.selected.p]:
+    seed_sequence = np.random.SeedSequence([seed, server_round, client_id, 0x51534744])
+    selection = adaptive_llz.select(
+        updates, levels=levels, rng=np.random.default_rng(seed_sequence),
+        budget=budget, window_size=window, cost=reply_size,
+    )
+    reply = build_reply(selection.selected, selection.candidates, selection.costs, perf_counter() - started)
+    expected_bytes = selection.costs[selection.selected.p]
+    if measure(reply)['serialized_object_bytes'] != expected_bytes:
         raise RuntimeError('Adaptive reply framing changed size after selection')
     return reply
 
@@ -88,7 +105,7 @@ def decode(content, reference, *, levels, server_round, budget, window):
     if type(p) is not int or p not in adaptive_llz.CANDIDATES:
         raise ValueError('Invalid adaptive selected p')
     expected = metadata(levels=levels, server_round=server_round, p=p, window=window, budget=budget)
-    if (dict(info) != expected or any(type(info[k]) is not type(v) for k,v in expected.items())):
+    if dict(info) != expected or any(type(info[key]) is not type(value) for key, value in expected.items()):
         raise ValueError('Adaptive codec, round or policy metadata mismatch')
     scalar_keys = ('adaptive_budget', 'adaptive_selection_seconds', 'adaptive_selected_message_bytes',
         'qsgd_input_squared_norm', 'llz_reconstruction_squared_error', 'llz_total_squared_error',
@@ -105,22 +122,31 @@ def decode(content, reference, *, levels, server_round, budget, window):
                 or any(type(v) is not float or not math.isfinite(v) or v < 0 for v in value)):
             raise ValueError(f'Invalid adaptive candidate diagnostic: {key}')
         arrays[key] = value
-    errors, costs = arrays['adaptive_candidate_squared_error'], arrays['adaptive_candidate_message_bytes']
+    errors = arrays['adaptive_candidate_squared_error']
+    costs = arrays['adaptive_candidate_message_bytes']
     payloads = arrays['adaptive_candidate_payload_bytes']
-    norm = metrics['qsgd_input_squared_norm']
-    feasible = [i for i in adaptive_llz.CANDIDATES if adaptive_llz.admissible(errors[i], norm, budget)]
+    total_errors = arrays['adaptive_candidate_total_squared_error']
+    selected_p = metrics.get('adaptive_selected_p')
     if (arrays['adaptive_candidate_p'] != [0., 1., 2.] or errors[0] != 0
             or any(v != int(v) for v in costs + payloads)
-            or any(c < b for c,b in zip(costs, payloads))
-            or type(metrics.get('adaptive_selected_p')) is not int or metrics['adaptive_selected_p'] != p
+            or any(cost < payload for cost, payload in zip(costs, payloads))):
+        raise ValueError('Adaptive selection or reported distortion is inconsistent')
+
+    update_norm = metrics['qsgd_input_squared_norm']
+    feasible = [
+        tolerance for tolerance in adaptive_llz.CANDIDATES
+        if adaptive_llz.admissible(errors[tolerance], update_norm, budget)
+    ]
+    if (type(selected_p) is not int or selected_p != p
             or metrics['adaptive_budget'] != budget
             or metrics['llz_max_code_error'] > p
             or (p == 0 and metrics['llz_code_squared_error'] != 0)
-            or not feasible or p != min(feasible, key=lambda i: (costs[i], i))
+            or not feasible or p != min(feasible, key=lambda tolerance: (costs[tolerance], tolerance))
             or metrics['llz_reconstruction_squared_error'] != errors[p]
-            or metrics['llz_total_squared_error'] != arrays['adaptive_candidate_total_squared_error'][p]
+            or metrics['llz_total_squared_error'] != total_errors[p]
             or metrics['adaptive_selected_message_bytes'] != costs[p]):
         raise ValueError('Adaptive selection or reported distortion is inconsistent')
+
     packets = content['qsgd']
     if (not isinstance(packets, ConfigRecord) or any(not isinstance(v, bytes) for v in packets.values())
             or sum(map(len, packets.values())) != payloads[p]):
