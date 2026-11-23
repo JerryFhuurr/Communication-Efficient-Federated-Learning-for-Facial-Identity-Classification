@@ -105,6 +105,30 @@ QSGD or fixed LLZ using `--compression qsgd` or
 development updates. Use `--evaluate-test` for final held-out evaluation
 after freezing the configuration.
 
+### Reproducing the seed-42 adaptive sweep
+
+The thesis sweep used learning rate 0.03 and a completed dense QSGD reference
+from commit `4e21dfc`. To regenerate that reference, run the CIFAR-10 profile
+at that revision with `--seed 42 --lr 0.03 --compression qsgd` on the full
+manifest. Keep the timestamped experiment directory, including its checkpoints
+and communication records. The batch checks the reference source and split.
+
+From the checkout containing the batch runner, install the project with its
+`reports` extra and run the following in Linux or WSL. Point `--reference` at
+the timestamped directory containing `experiment.json`.
+
+```bash
+.venv/bin/python -m flower_face.cifar10_batch \
+  --reference /path/to/completed-qsgd-experiment \
+  --manifest data/cifar10/manifest.json \
+  --output-dir outputs/cifar10-adaptive-seed42
+```
+
+Reuse the same arguments to resume. The batch checks completed attempts,
+verifies exact lossless replay, and freezes the three budgets before adaptive
+training. See the [calibration protocol](docs/thesis/cifar10-calibration-protocol-2026-11-20.md)
+for the original source and manifest hashes.
+
 ## CelebA demo
 
 The saved CelebA demo uses `data/subset/manifest.json` and the images it
